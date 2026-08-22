@@ -1,0 +1,22 @@
+# tools_config.yaml
+#
+# Tools configuration for the Google Ads MCP server.
+# Modify this file to enable/disable tool namespaces or set custom prefixes.
+
+namespaces:
+  customers: true
+  search: true
+  metadata: true
+  mutate: true
+  demandgen: true
+  pmax: true
+  extensions: true
+  targeting: true
+  shopping: true
+  video: true
+  display: true
+  tracking: true
+  audiences: true
+  optimize: true
+  negatives: true
+  experiments: true
