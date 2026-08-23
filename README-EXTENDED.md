@@ -1,80 +1,283 @@
 # google-ads-mcp-extended
 
-Розширення Google Ads MCP-сервера: до read-only інструментів
-додані **write-інструменти** для керування кампаніями.
+## Overview
 
-## Нові інструменти (namespace `mutate`)
+This repository extends the read-only Google Ads MCP server with **write
+tools** for campaign management. The server exposes **98 tools** across 16
+namespaces: 16 read-only tools (reporting, lookups and listings) and 82 write
+tools, all of which default to a dry-run preview (see
+[Safety model](#safety-model)).
 
-| Інструмент | Що робить |
+Supported areas: Search, Demand Gen, Performance Max, Shopping, Video and
+Display campaigns; ad groups and ads; keywords and negative keyword lists;
+extensions (assets); targeting; tracking templates; audiences; Google
+recommendations and Smart Bidding hints; labels; and campaign experiments.
+
+### Changed and added files relative to upstream
+
+- New tool modules under `ads_mcp/tools/`: `mutate.py`, `demand_gen.py`,
+  `pmax.py`, `extensions.py`, `targeting.py`, `shopping.py`, `video.py`,
+  `display.py`, `tracking.py`, `audiences.py`, `optimize.py`, `negatives.py`,
+  `experiments.py`.
+- New module `ads_mcp/safe_fetch.py` — hardened fetching of user-supplied
+  image sources (HTTPS-only, no redirects, private addresses refused).
+- New module `ads_mcp/resources/fetch_cache.py` — shared timeout, size caps
+  and TTL caching for the documentation resources.
+- Modified: `ads_mcp/config.py` and `ads_mcp/tools_config.yaml` (namespace
+  registration and configuration semantics), `ads_mcp/utils.py` (shared
+  helpers, client caching), `ads_mcp/coordinator.py` (mount-time tool
+  filtering), the four `ads_mcp/resources/` modules (timeouts and caching),
+  `ads_mcp/update_references.py` (console-script import fix), `README.md`,
+  `Dockerfile`, `.gitignore`, plus tests.
+- New file: `.dockerignore`.
+- New skill: `ads_mcp/skills/account-performance-diagnostics`.
+
+Upstream updates can still be merged normally; the write tools live in
+separate modules.
+
+## Safety model
+
+Every write tool has a `confirm` parameter:
+
+- `confirm=false` (default) — nothing is changed. For most write tools the
+  request is sent to Google Ads with `validate_only=true`, so Google fully
+  validates the operation and the tool returns a preview of what would
+  happen.
+- `confirm=true` — the operation is applied.
+
+Five tools send **nothing** to Google in dry-run mode; their previews are
+built locally and may still fail on apply. For
+`optimize_recommendation_apply` and `optimize_recommendation_dismiss` the
+underlying API requests have no `validate_only` field, so remote validation
+is impossible. For `experiments_experiment_create`,
+`experiments_experiment_end` and `experiments_experiment_promote` the API
+does support `validate_only`, but experiment creation and scheduling cannot
+be meaningfully validated end-to-end in a dry-run, so these tools skip the
+call entirely. All five report `"validated": false` in their previews.
+
+Every preview states which guarantee it carries: the result includes
+`"validated": true` when Google Ads validated the request, and
+`"validated": false` when no request was sent.
+
+An accidental change is therefore a two-step mistake at minimum: the
+assistant first shows a preview, and only a second call with `confirm=true`
+touches the account. Tools that can remove objects are annotated with
+`destructiveHint=true`. Recommendation: if your MCP client supports it, set
+write tools to require confirmation before every call (**Ask first**).
+
+## Tools by namespace
+
+Tool names below include the default namespace prefix from
+`ads_mcp/tools_config.yaml`. Tools marked *read-only* never modify the
+account.
+
+Cross-cutting parameters shared by several tools:
+
+- `start_date` / `end_date` (`YYYY-MM-DD` or `YYYY-MM-DD HH:MM:SS`) on all
+  `*_campaign_create` tools.
+- `tracking_url_template` at ad level on `mutate_ad_create_rsa`, the Demand
+  Gen image/video/carousel ads, `display_ad_create_responsive` and
+  `video_ad_create_responsive`.
+- `negative: true` on `demandgen_audience_attach` (ad group level) and
+  `audiences_campaign_audience_attach` (campaign level) to attach an audience
+  as an exclusion.
+
+### customers
+
+| Tool | Description |
 |---|---|
-| `mutate_campaign_create` | Створює кампанію + окремий денний бюджет. Типи: SEARCH, DISPLAY, SHOPPING, VIDEO, PERFORMANCE_MAX, DEMAND_GEN. Стратегії: Maximize Conversions (+target CPA), Maximize Conversion Value (+target ROAS), Maximize Clicks, Manual CPC. Створюється PAUSED за замовчуванням. |
-| `mutate_campaign_update_status` | Пауза / запуск / видалення кампанії (ENABLED, PAUSED, REMOVED). |
-| `mutate_campaign_budget_update` | Зміна денного бюджету кампанії. Попереджає, якщо бюджет спільний (shared). |
-| `mutate_list_campaigns` | Довідковий (read-only): список кампаній з id, назвою, статусом і бюджетом. |
-| `mutate_ad_group_create` / `mutate_ad_group_update` | Створення і редагування груп оголошень (статус, ставка CPC, назва). |
-| `mutate_keywords_add` / `mutate_keywords_remove` | Додавання keywords/negative keywords (EXACT/PHRASE/BROAD), видалення за criterion id. |
-| `mutate_ad_create_rsa` | Створення Responsive Search Ad (3-15 заголовків, 2-4 описи, валідація лімітів). |
-| `mutate_ad_update_status` | Пауза/запуск/видалення оголошення (будь-якого типу). |
+| `customers_list_accessible_customers` | Read-only: ids of customer accounts directly accessible to the authenticated user. |
 
-## Demand Gen (namespace `demandgen`)
+### search
 
-| Інструмент | Що робить |
+| Tool | Description |
 |---|---|
-| `demandgen_asset_upload_image` | Завантаження зображення як Asset (URL або локальний файл, ліміт 5MB). |
-| `demandgen_asset_create_youtube_video` | Реєстрація YouTube-відео як Asset. |
-| `demandgen_list_assets` | Read-only: пошук наявних asset-ів (IMAGE / YOUTUBE_VIDEO). |
-| `demandgen_campaign_create` | DG-кампанія + бюджет (Max Conversions/tCPA, Max Conv Value/tROAS, Max Clicks). |
-| `demandgen_campaign_update_bidding` | Зміна tCPA/tROAS існуючої кампанії. |
-| `demandgen_ad_group_create` | Група оголошень у DG-кампанії. |
-| `demandgen_audience_attach` | Прив'язка існуючої аудиторії до групи. |
-| `demandgen_ad_create_image` | Image ad (multi-asset): landscape + square + лого + тексти. |
-| `demandgen_ad_create_video` | Video ad: YouTube-відео + заголовки/довгі заголовки/описи + лого. |
+| `search_search` | Read-only: fetches data from any Google Ads resource via GAQL (fields, conditions, orderings, optional limit). |
 
-## Performance Max (namespace `pmax`)
+### metadata
 
-| Інструмент | Що робить |
+| Tool | Description |
 |---|---|
-| `pmax_campaign_create` | PMax-кампанія + бюджет (Max Conversions/tCPA або Max Conv Value/tROAS). |
-| `pmax_campaign_update_bidding` | Зміна tCPA/tROAS існуючої кампанії. |
-| `pmax_asset_group_create` | Повний asset group одним запитом: тексти створюються автоматично, картинки/відео — за asset id. Валідація мінімумів Google. |
-| `pmax_asset_group_update` | Статус / назва / final URL asset group. |
-| `pmax_asset_group_add_texts` | Додавання заголовків/описів у наявний asset group. |
-| `pmax_asset_group_add_media` | Прив'язка зображень/відео до asset group. |
-| `pmax_asset_group_remove_asset` | Відв'язка asset-а від групи (сам asset лишається в акаунті). |
-| `pmax_signal_attach` | Audience signal або search theme для asset group. |
-| `pmax_list_asset_groups` | Read-only: asset groups з ad strength і статусами. |
+| `metadata_get_resource_metadata` | Read-only: selectable, filterable and sortable fields for a resource type, e.g. "campaign". |
 
-## Запобіжник: dry-run за замовчуванням
+### mutate
 
-Кожен write-інструмент має параметр `confirm`:
+| Tool | Description |
+|---|---|
+| `mutate_campaign_create` | Creates a campaign plus a dedicated daily budget. Types: SEARCH, DISPLAY, SHOPPING, VIDEO, PERFORMANCE_MAX, DEMAND_GEN. Bidding: Maximize Conversions (+target CPA), Maximize Conversion Value (+target ROAS), Maximize Clicks, Manual CPC. Created PAUSED by default. |
+| `mutate_campaign_update_status` | Pauses, enables or removes a campaign (ENABLED, PAUSED, REMOVED). |
+| `mutate_campaign_set_target_roas` | Sets Target ROAS on a Maximize Conversion Value campaign. |
+| `mutate_campaign_set_merchant` | Links a Merchant Center feed to an existing campaign (PMax/Shopping). |
+| `mutate_campaign_update_settings` | Updates campaign network settings, geo target type and asset automation / AI Max settings. |
+| `mutate_campaign_rename` | Renames an existing campaign. |
+| `mutate_campaign_budget_update` | Changes the daily budget of a campaign; warns when the budget is shared. |
+| `mutate_ad_group_create` | Creates a SEARCH_STANDARD ad group in an existing campaign. |
+| `mutate_ad_group_update` | Updates an ad group: status, max CPC bid and/or name. |
+| `mutate_keywords_ideas` | Read-only: keyword ideas from Google Keyword Planner. |
+| `mutate_keywords_add` | Adds keywords or negative keywords (EXACT/PHRASE/BROAD) to an ad group. |
+| `mutate_keywords_remove` | Removes keywords from an ad group by criterion id. Irreversible. |
+| `mutate_ad_create_rsa` | Creates a Responsive Search Ad (3-15 headlines, 2-4 descriptions, limits validated). |
+| `mutate_ad_update_status` | Pauses, enables or removes an ad of any type. |
+| `mutate_list_campaigns` | Read-only: campaigns with id, name, status and budget. |
+| `mutate_campaign_set_conversion_goals` | Sets campaign-specific standard conversion goal categories (e.g. only Purchases biddable). |
+| `mutate_campaign_set_custom_conversion_goal` | Points a campaign at a custom conversion goal (disables category goals). |
 
-- `confirm=false` (за замовчуванням) — запит відправляється з `validate_only=true`:
-  Google Ads повністю валідує операцію, але **нічого не змінює**. Повертається прев'ю.
-- `confirm=true` — операція застосовується.
+### demandgen
 
-Тобто випадкова зміна неможлива: асистент спочатку покаже прев'ю, і лише
-після повторного виклику з підтвердженням зміни потраплять в акаунт.
+| Tool | Description |
+|---|---|
+| `demandgen_asset_upload_image` | Uploads an image as an Asset. HTTPS URLs only (redirects are not followed); local file paths are honoured only when `GOOGLE_ADS_MCP_ALLOW_LOCAL_FILES=1` is set. JPEG/PNG, 5 MB limit. |
+| `demandgen_asset_create_youtube_video` | Registers a YouTube video as an Asset. |
+| `demandgen_list_assets` | Read-only: IMAGE / YOUTUBE_VIDEO assets in the account. |
+| `demandgen_campaign_create` | Demand Gen campaign plus budget (Max Conversions/tCPA, Max Conversion Value/tROAS, Max Clicks). |
+| `demandgen_campaign_update_bidding` | Updates tCPA/tROAS of an existing Demand Gen campaign. |
+| `demandgen_campaign_set_targeting_level` | Sets the targeting level (campaign vs ad group) of an existing Demand Gen campaign. |
+| `demandgen_ad_group_create` | Ad group in a Demand Gen campaign, optionally with channel controls. |
+| `demandgen_ad_group_update_channels` | Changes the channel controls (placements) of an existing ad group. |
+| `demandgen_audience_attach` | Attaches an existing Audience to an ad group, as targeting or as an exclusion. |
+| `demandgen_ad_create_image` | Image ad (multi-asset: landscape + square + logo + texts). |
+| `demandgen_ad_create_video` | Video ad: YouTube video + headlines/long headlines/descriptions + logo, optional `call_to_action` button. |
+| `demandgen_ad_update_asset_optimization` | Toggles the "Asset optimization" settings of an ad. |
+| `demandgen_ad_create_carousel` | Carousel ad (2-10 swipeable cards). |
 
-Рекомендація: якщо ваш MCP-клієнт це підтримує, виставити write-інструментам
-режим підтвердження перед кожним викликом (**Ask first**).
+### pmax
 
-## Встановлення (кожен користувач)
+| Tool | Description |
+|---|---|
+| `pmax_campaign_create` | Performance Max campaign plus budget (Max Conversions/tCPA or Max Conversion Value/tROAS), optional Merchant Center feed. |
+| `pmax_campaign_update_bidding` | Updates tCPA/tROAS of a PMax campaign. |
+| `pmax_asset_group_create` | Complete asset group in one request: texts created inline, images/videos by asset id. Validates Google's minimums. |
+| `pmax_asset_group_update` | Status, name and/or final URL of an asset group. |
+| `pmax_asset_group_add_texts` | Adds headlines/descriptions to an existing asset group. |
+| `pmax_asset_group_add_media` | Links existing image/video assets to an asset group. |
+| `pmax_asset_group_remove_asset` | Unlinks an asset from a group (the asset itself stays in the account). |
+| `pmax_signal_attach` | Audience signal or search theme for an asset group. |
+| `pmax_asset_group_set_listing_filter` | Listing group filter tree subdivided by a product custom label (include values, exclude the rest). |
+| `pmax_asset_group_set_all_products` | Root "All products" listing group filter for retail feeds. |
+| `pmax_list_asset_groups` | Read-only: asset groups with ad strength and statuses. |
 
-1. Потрібні: Python 3.10+, pipx (`python3 -m pip install --user pipx`), gcloud CLI.
-2. Авторизація (одноразово; потрібен client_secret.json OAuth-клієнта з
-   Google Cloud Console вашого проекту):
+### extensions
+
+| Tool | Description |
+|---|---|
+| `extensions_add_sitelinks` | Sitelinks for a campaign (text + URL + descriptions, limits validated). |
+| `extensions_add_callouts` | Callouts (short USP phrases, max 25 characters). |
+| `extensions_add_structured_snippets` | Structured snippets (header + 3-10 values). |
+| `extensions_attach_assets` | Links EXISTING assets by id (SITELINK/CALLOUT/STRUCTURED_SNIPPET/BUSINESS_NAME/BUSINESS_LOGO) — for cloning without duplication. |
+| `extensions_remove_campaign_asset` | Unlinks an extension asset from a campaign (asset kept). |
+| `extensions_list_campaign_assets` | Read-only: extension assets linked to a campaign, with asset ids. |
+
+### targeting
+
+| Tool | Description |
+|---|---|
+| `targeting_geo_lookup` | Read-only: geo target ids by location names. |
+| `targeting_set_locations` | Location targeting or exclusions on a campaign. |
+| `targeting_set_locations_ad_group` | Location targeting or exclusions at ad group level. |
+| `targeting_set_languages` | Language targeting (by codes such as en/de/fr; ids resolved automatically). |
+| `targeting_set_ad_schedule` | Ad schedule (day + hours, in the account time zone). |
+| `targeting_set_demographics` | Excludes age ranges and/or genders at ad group or campaign level. |
+| `targeting_set_device_bid_modifiers` | Device bid modifiers on a campaign. |
+| `targeting_set_frequency_cap` | Campaign-level frequency cap (Video / Display / Demand Gen). |
+| `targeting_set_content_exclusions` | Excludes content categories (brand safety). |
+| `targeting_set_ad_group_target_restrictions` | Sets which targeting dimensions restrict reach (Targeting) vs only report (Observation). |
+| `targeting_remove_criterion` | Removes targeting criteria. |
+| `targeting_list_criteria` | Read-only: current campaign targeting with criterion ids. |
+
+### shopping
+
+| Tool | Description |
+|---|---|
+| `shopping_campaign_create` | Standard Shopping campaign (Merchant Center id, feed label, priority) plus budget. |
+| `shopping_ad_group_create` | SHOPPING_PRODUCT_ADS ad group. |
+| `shopping_ad_create_product` | Product ad in a Shopping ad group. |
+| `shopping_ad_group_set_item_listing` | Listing group tree partitioned by item id. |
+| `shopping_ad_group_set_all_products` | Root "All products" listing group. |
+
+### video
+
+| Tool | Description |
+|---|---|
+| `video_campaign_create` | Video campaign (YouTube) plus budget. |
+| `video_ad_group_create` | VIDEO_RESPONSIVE ad group. |
+| `video_ad_create_responsive` | Responsive video ad (YouTube video + texts). |
+
+### display
+
+| Tool | Description |
+|---|---|
+| `display_campaign_create` | Display campaign (GDN) plus budget. |
+| `display_ad_group_create` | DISPLAY_STANDARD ad group. |
+| `display_ad_create_responsive` | Responsive Display Ad (texts + images, optional video/logo/CTA). |
+
+### tracking
+
+| Tool | Description |
+|---|---|
+| `tracking_campaign_set_tracking` | Sets the tracking URL template and/or final URL suffix of a campaign. Passing `""` clears a field; the preview lists it under `will_clear`. |
+| `tracking_account_set_tracking` | Account-level tracking template / final URL suffix; same `""`-clears semantics. |
+| `tracking_list_tracking` | Read-only: account-level and per-campaign tracking templates / suffixes. |
+
+### audiences
+
+| Tool | Description |
+|---|---|
+| `audiences_create` | Combined Audience from demographic + segment dimensions. |
+| `audiences_custom_segment_create` | Custom segment (custom audience) from keywords and/or URLs. |
+| `audiences_user_list_create_visitors` | Rule-based remarketing list of page visitors matched by URL rule. |
+| `audiences_campaign_audience_attach` | Attaches a user list or a combined Audience to a campaign, as targeting or exclusion. |
+| `audiences_list_audiences` | Read-only: audiences available in the account. |
+
+### optimize
+
+| Tool | Description |
+|---|---|
+| `optimize_recommendations_list` | Read-only: Google's optimization recommendations. |
+| `optimize_recommendation_apply` | Applies recommendations (with their default parameters). |
+| `optimize_recommendation_dismiss` | Dismisses recommendations. |
+| `optimize_change_history` | Read-only: recent account changes — who changed what and when. |
+| `optimize_seasonality_adjustment_create` | Seasonality adjustment: tells Smart Bidding to expect a temporary conversion rate change. |
+| `optimize_data_exclusion_create` | Data exclusion: tells Smart Bidding to ignore a date range. |
+| `optimize_label_create` | Creates a label. |
+| `optimize_label_apply` | Applies an existing label to campaigns and/or ad groups. |
+
+### negatives
+
+| Tool | Description |
+|---|---|
+| `negatives_add_campaign_keywords` | Campaign-level negative keywords, added directly to a campaign. |
+| `negatives_shared_set_create` | Creates a shared negative keyword list. |
+| `negatives_shared_set_add_keywords` | Adds negative keywords to a shared list. |
+| `negatives_attach_to_campaigns` | Attaches a shared negative keyword list to campaigns. |
+| `negatives_list_shared_sets` | Read-only: shared negative keyword lists with ids and usage counts. |
+
+### experiments
+
+| Tool | Description |
+|---|---|
+| `experiments_experiment_create` | Creates and schedules a campaign experiment (A/B test with traffic split). |
+| `experiments_experiments_list` | Read-only: experiments with status and their arm campaigns. |
+| `experiments_experiment_end` | Ends a running experiment. |
+| `experiments_experiment_promote` | Promotes a winning experiment to the base campaign. |
+
+## Install
+
+1. Requirements: Python 3.10+, pipx (`python3 -m pip install --user pipx`),
+   the gcloud CLI.
+2. One-time authorization (requires the `client_secret.json` of an OAuth
+   client from your project's Google Cloud Console):
 
    ```
    gcloud auth application-default login \
-     --client-id-file=/шлях/до/client_secret.json \
+     --client-id-file=/path/to/client_secret.json \
      --scopes="https://www.googleapis.com/auth/adwords,https://www.googleapis.com/auth/cloud-platform"
    ```
 
-3. Блок у конфігурації MCP-клієнта (секція `mcpServers`):
+3. Add a block to your MCP client configuration (inside `mcpServers`):
 
    ```json
    "google-ads": {
-     "command": "ШЛЯХ_ДО_PYTHON3",
+     "command": "PATH_TO_PYTHON3",
      "args": [
        "-m", "pipx", "run", "--no-cache",
        "--spec", "git+https://github.com/YOUR_ORG/google-ads-mcp-extended.git",
@@ -89,147 +292,168 @@
    }
    ```
 
-   `ШЛЯХ_ДО_PYTHON3` — вивід команди `which python3`.
-   Для локального тесту без GitHub замініть `--spec` на шлях до цієї папки.
+   `PATH_TO_PYTHON3` is the output of `which python3`. For a local test
+   without GitHub, replace the `--spec` value with the path to this folder.
 
-4. Повністю перезапустіть MCP-клієнт (не просто закрийте вікно).
+4. Fully restart the MCP client (not just the window).
 
-## Що додано до базового сервера
+## Limitations
 
-- `ads_mcp/tools/mutate.py` — новий модуль з write-інструментами.
-- `ads_mcp/tools_config.yaml` — додано namespace `mutate: true`.
-- `ads_mcp/config.py` — `mutate` додано в `ALL_CATEGORIES`.
+- Demand Gen channel controls are supported at ad group level
+  (`demandgen_ad_group_create` / `demandgen_ad_group_update_channels`:
+  selected channels or a channel strategy).
+- PMax listing group filters support the root "All products" node
+  (`pmax_asset_group_set_all_products`) and trees subdivided by a single
+  product custom label (`pmax_asset_group_set_listing_filter`); arbitrary
+  multi-level subdivision trees are not supported.
+- Editing the texts of an existing ad means creating a new ad — Google Ads
+  API ad content is immutable.
+- `demandgen_ad_create_video`: the `call_to_action` enum is validated on
+  dry-run, but the CTA asset is only created and linked on `confirm=true`,
+  so the dry-run validates the ad payload without the CTA link.
+- The developer token must have Basic access or higher.
 
-Все інше — без змін, тому оновлення з upstream підтягуються звичайним merge.
+## Behaviour changes
 
-## Extensions (namespace `extensions`)
+Notable changes compared to earlier revisions of these tools:
 
-| Інструмент | Що робить |
-|---|---|
-| `extensions_add_sitelinks` | Sitelinks для кампанії (текст + URL + описи, валідація лімітів). |
-| `extensions_add_callouts` | Callouts (короткі USP-фрази ≤25 символів). |
-| `extensions_add_structured_snippets` | Structured snippets (header + 3-10 значень). |
-| `extensions_attach_assets` | Прив'язка ІСНУЮЧИХ asset-ів за id (SITELINK/CALLOUT/STRUCTURED_SNIPPET/BUSINESS_NAME/BUSINESS_LOGO) — для клонування без дублювання. |
-| `extensions_remove_campaign_asset` | Відв'язка extension-а від кампанії. |
-| `extensions_list_campaign_assets` | Read-only: список extensions кампанії з asset id. |
+- **Image upload is HTTPS-only.** `demandgen_asset_upload_image` rejects
+  `http://` URLs, never follows redirects, and refuses hosts that resolve to
+  private, loopback, link-local or otherwise non-public addresses. Local
+  file paths only work when the server is started with
+  `GOOGLE_ADS_MCP_ALLOW_LOCAL_FILES=1` (appropriate for a local stdio
+  server, never for a hosted one).
+- **`mutate_keywords_add` no longer auto-exempts policy violations.**
+  `auto_exempt` now defaults to `false`; keywords blocked by policy are
+  reported in `policy_failed`, each with an `"exemptible"` flag, instead of
+  being silently re-sent with a policy exemption. Pass `auto_exempt=true`
+  explicitly to assert that flagged violations are false positives.
+- **List tools apply default limits and report truncation.** Dict-shaped
+  results carry a `"truncated"` flag; list-shaped ones return a wrapper dict
+  with the item list (key `"items"`, or `"asset_groups"` /
+  `"experiments"` for the PMax and experiments listings) plus `"returned"`
+  and `"truncated"`. An entry missing
+  from a truncated listing means "not listed", not "does not exist" — raise
+  the `limit` or narrow the query before concluding something is absent.
+- **An empty `namespaces:` block enables nothing.** In `tools_config.yaml`,
+  a `namespaces` key that is present but empty disables all tools; omit the
+  key entirely to keep the enable-all default.
+- **Tracking previews disclose clears.** When `""` is passed to the tracking
+  tools, the dry-run preview lists the fields about to be wiped under
+  `"will_clear"`.
+- **Falsy values are no longer silently ignored.** Where passing `0` or `""`
+  used to be dropped from the update, it now either performs an explicit,
+  documented clear or raises a validation error: `cpc_bid` and bidding
+  targets must be greater than 0, and names must be non-empty.
 
-## Targeting (namespace `targeting`) — для всіх типів кампаній
+## Campaign cloning checklist
 
-| Інструмент | Що робить |
-|---|---|
-| `targeting_geo_lookup` | Read-only: пошук geo id за назвами локацій. |
-| `targeting_set_locations` | Geo-таргетинг або виключення локацій. |
-| `targeting_set_languages` | Мовний таргетинг (за кодами en/de/uk..., id шукаються автоматично). |
-| `targeting_set_ad_schedule` | Розклад показів (день + години, у таймзоні акаунта). |
-| `targeting_remove_criterion` | Видалення критеріїв таргетингу. |
-| `targeting_list_criteria` | Read-only: поточний таргетинг кампанії з criterion id. |
+When recreating a campaign from a template campaign, read each layer from
+the template via `search_search` first, then reproduce it. The order below
+matters, and nothing should be left "at defaults" — API defaults differ from
+UI defaults.
 
-Також: `demandgen_ad_create_carousel` (карусель 2-10 карток) і
-`pmax_asset_group_set_all_products` (root listing group для retail-фідів).
+**Layer 1 — campaign:**
 
-## Shopping / Video / Display
+1. `campaign`: type, bidding (+tCPA/tROAS), budget (amount, delivery,
+   shared?).
+2. `campaign.tracking_url_template` + `final_url_suffix` +
+   `url_custom_parameters` — critical; analytics breaks without them.
+3. `conversion_goal_campaign_config` — custom goal or customer defaults. If
+   custom: `mutate_campaign_set_custom_conversion_goal` (which also disables
+   category goals).
+4. `campaign_criterion`: LOCATION (+ `geo_target_type_setting`
+   PRESENCE/INTEREST), LANGUAGE, DEVICE, ad schedule, content labels.
+5. Demand Gen: `demand_gen_campaign_settings.upgraded_targeting` —
+   `demandgen_campaign_create` always sets it to `false` (campaign-level
+   geo, matching the UI default). The flag is IMMUTABLE: a wrong value
+   cannot be fixed by an update, only by recreating the campaign.
 
-- `shopping_campaign_create` (Merchant Center id, feed label, priority) → `shopping_ad_group_create` → `shopping_ad_create_product` → `shopping_ad_group_set_all_products`.
-- `video_campaign_create` → `video_ad_group_create` (VIDEO_RESPONSIVE) → `video_ad_create_responsive` (YouTube-відео + тексти).
-- `display_campaign_create` → `display_ad_group_create` → `display_ad_create_responsive` (RDA: тексти + зображення + опційно відео/лого/CTA).
+**Layer 2 — ad groups:**
 
-## Змінені/додані файли відносно upstream
+6. `ad_group.demand_gen_ad_group_settings.channel_controls` — read the
+   template's mode (SELECTED_CHANNELS vs CHANNEL_STRATEGY) and its exact
+   channel set instead of assuming a default; different ad groups in the
+   same campaign often use different channel sets (for example, video ad
+   groups vs image ad groups).
+7. `ad_group_criterion` with type=AUDIENCE — the audience attachment.
+   Demographic restrictions live INSIDE the Audience object; standalone
+   age/gender criteria are not needed and are rejected on Demand Gen.
+8. `ad_group.targeting_setting.target_restrictions` — copy each dimension's
+   Targeting vs Observation setting from the template via
+   `targeting_set_ad_group_target_restrictions`; do not assume which
+   dimensions restrict reach.
 
-- `ads_mcp/tools/mutate.py` — write-інструменти Search (кампанії, бюджети, групи, keywords, RSA).
-- `ads_mcp/tools/demand_gen.py` — Demand Gen: assets, кампанії, image/video/carousel ads.
-- `ads_mcp/tools/pmax.py` — Performance Max: asset groups, signals, listing groups.
-- `ads_mcp/tools/extensions.py` — sitelinks, callouts, structured snippets.
-- `ads_mcp/tools/targeting.py` — geo, мови, розклад показів.
-- `ads_mcp/tools_config.yaml`, `ads_mcp/config.py` — реєстрація namespace-ів.
+**Layer 3 — ads:**
 
-## Поточні обмеження
+9. All ad types in the group with their full content: texts
+   (headlines/long_headlines/descriptions/business_name/CTA), asset ids of
+   ALL image formats (landscape, square, portrait, logo), videos,
+   `final_urls` (check http vs https).
+10. Statuses: campaign/ad groups/ads = PAUSED until manually reviewed.
 
-- Demand Gen: channel controls підтримані на рівні ad group (demandgen_ad_group_create/update_channels: selected channels або strategy); створення нових комбінованих Audience — через UI.
-- PMax: listing groups підтримані лише в режимі «All products» (без дерева підрозділів).
-- Редагування текстів існуючого оголошення = створення нового (обмеження Google Ads API — тексти ads незмінні).
-- Developer token повинен мати Basic access або вище.
+**Layer 4 — verification (mandatory):**
 
-## Tracking / UTM (namespace `tracking`)
+11. Re-read what was created and diff it against the template: campaign
+    fields, criteria, goals (`biddable=true` should return 0 rows when a
+    custom goal is set), channel controls, targeting settings, ad counts.
 
-`tracking_campaign_set_tracking`, `tracking_account_set_tracking` (tracking_url_template + final_url_suffix), `tracking_list_tracking` (огляд по акаунту і кампаніях).
+**Known API pitfalls:** category conversion goals are all enabled by
+default; API-created Demand Gen campaigns default to
+`upgraded_targeting=true`; the REMOVED status can only be reached through a
+remove operation; ads are immutable (replacing texts = new ad + pausing the
+old one).
 
-## Audiences (namespace `audiences`)
+### Known cloning limits (verify manually)
 
-`audiences_custom_segment_create` (custom segment з keywords/URLs), `audiences_user_list_create_visitors` (ремаркетинг-лист відвідувачів за URL-правилом), `audiences_campaign_audience_attach`, `audiences_list_audiences`.
+- **Shared budgets**: `campaign_create` always creates a dedicated budget.
+  If the template uses a shared budget, the clone will not inherit it.
+- **Portfolio bid strategies**: only standard campaign bidding is
+  supported. Campaigns on portfolio strategies cannot be cloned exactly.
+- **Pinned headlines**: pinning headlines to positions (`pinned_field`) in
+  RSA/Demand Gen ads is not carried over — check pinning manually after
+  cloning.
 
-## Optimize (namespace `optimize`)
+### Retail PMax (Merchant Center) notes
 
-`optimize_recommendations_list` / `recommendation_apply` / `recommendation_dismiss` (Google recommendations), `optimize_change_history` (хто що змінив), `optimize_seasonality_adjustment_create` і `optimize_data_exclusion_create` (підказки Smart Bidding), `optimize_label_create` / `label_apply`.
-
-## Negatives (namespace `negatives`)
-
-`negatives_shared_set_create` / `shared_set_add_keywords` / `attach_to_campaigns` / `list_shared_sets` — спільні списки мінус-слів.
-
-## Experiments (namespace `experiments`)
-
-`experiments_experiment_create` (A/B тест кампанії зі спліт-трафіком), `experiments_list`, `experiment_end`, `experiment_promote`.
-
-## Розширений targeting
-
-`targeting_set_demographics` (виключення віку/статі), `targeting_set_device_bid_modifiers`, `targeting_set_frequency_cap`, `targeting_set_content_exclusions` (brand safety).
-
-## Правила точного клонування кампанії (чекліст)
-
-Виведені з бойового клонування DG-кампанії 19-20.07.2026. Порядок обов'язковий;
-кожен шар СПОЧАТКУ читається з кампанії-шаблона через search_search, ПОТІМ
-відтворюється. Нічого не залишати "за замовчуванням" — дефолти API ≠ дефолти UI.
-
-**Шар 1 — кампанія:**
-1. `campaign`: тип, біддинг (+tCPA/tROAS), бюджет (amount, delivery, shared?).
-2. `campaign.tracking_url_template` + `final_url_suffix` + `url_custom_parameters` — КРИТИЧНО, без цього ламається аналітика.
-3. `conversion_goal_campaign_config` — custom goal чи customer-дефолти. Якщо custom: `campaign_set_custom_conversion_goal` (він же вимикає категорійні цілі).
-4. `campaign_criterion`: LOCATION (+ `geo_target_type_setting` PRESENCE/INTEREST), LANGUAGE, DEVICE, ad schedule, content labels.
-5. DG: `demand_gen_campaign_settings.upgraded_targeting` — наш `campaign_create` завжди ставить false (campaign-level гео, як у UI). Прапорець IMMUTABLE — помилку не виправити update-ом, тільки перестворенням.
-
-**Шар 2 — групи оголошень:**
-6. `ad_group.demand_gen_ad_group_settings.channel_controls` — режим (SELECTED_CHANNELS чи CHANNEL_STRATEGY) і конкретні канали. Типовий розподіл: video-групи = YT in-stream+in-feed+Shorts; image-групи = ALL_OWNED_AND_OPERATED.
-7. `ad_group_criterion` type=AUDIENCE — прив'язка аудиторії (демографія чоловіки/45+ живе ВСЕРЕДИНІ Audience-об'єкта, окремі age/gender критерії не потрібні і будуть відхилені).
-8. `ad_group.targeting_setting.target_restrictions` — режим Targeting vs Observation по вимірах (шаблон: AUDIENCE/TOPIC/PLACEMENT=Targeting, GENDER/AGE_RANGE/PARENTAL_STATUS/INCOME_RANGE=Observation) → `targeting_set_ad_group_target_restrictions`.
-
-**Шар 3 — оголошення:**
-9. Всі типи ads групи + повний вміст: тексти (headlines/long_headlines/descriptions/business_name/CTA), asset id всіх форматів зображень (landscape + square + PORTRAIT + logo), відео, final_urls (звірити http/https).
-10. Статуси: кампанія/групи/ads = PAUSED до ручної перевірки.
-
-**Шар 4 — верифікація (обов'язково):**
-11. Пере-прочитати створене і зрівняти з шаблоном: campaign fields, criteria, goals (`biddable=true` має дати 0 рядків при custom goal), channel controls, targeting_setting, кількість ads.
-
-**Відомі граблі API:** category conversion goals за замовчуванням всі увімкнені;
-API-створені DG-кампанії мають upgraded_targeting=true; статус REMOVED — тільки
-через remove-операцію; ads незмінні (заміна текстів = нове оголошення + пауза старого).
-
-## Відомі межі клонування (перевіряти вручну)
-
-- **Shared budgets**: campaign_create завжди створює окремий бюджет. Якщо шаблон на спільному бюджеті — клон його не успадкує.
-- **Portfolio bid strategies**: підтримується лише стандартний біддинг кампанії. Кампанії на портфельних стратегіях клонувати точно не можна.
-- **Pinned headlines**: закріплення заголовків за позиціями (pinned_field) у RSA/DG-оголошеннях не переноситься — після клону перевірити пінінг вручну.
-
-## Нове (пп. 4-7)
-
-- `start_date` / `end_date` (YYYY-MM-DD або "YYYY-MM-DD HH:MM:SS") — у всіх campaign_create (mutate, demandgen, pmax, shopping, display); у v24 API це поля `start_date_time`/`end_date_time`.
-- `tracking_url_template` на рівні оголошення — mutate_ad_create_rsa, demandgen image/video/carousel, display RDA, video responsive.
-- `negative: true` — виключення аудиторій: `demandgen_audience_attach` (рівень групи) і `audiences_campaign_audience_attach` (рівень кампанії).
-- `call_to_action` у `demandgen_ad_create_video` — enum-кнопка (LEARN_MORE, SIGN_UP, APPLY_NOW, CONTACT_US, SUBSCRIBE, DOWNLOAD, BOOK_NOW, SHOP_NOW, BUY_NOW, ORDER_NOW, START_NOW, VISIT_SITE, WATCH_NOW, SEE_MORE, PLAY_NOW, GET_QUOTE, DONATE_NOW). Створює CTA-asset і лінкує до оголошення; працює тільки при confirm=true (на dry-run asset не створюється).
-- Лейбли кампаній: уже покриті optimize_label_create + optimize_label_apply.
-
-## Retail PMax (Merchant Center) — нюанси клонування
-
-Перевірено на клонуванні retail PMax-кампанії з фідом Merchant Center:
-
-1. **Merchant Center / feed_label** задаються ТІЛЬКИ при створенні (`pmax_campaign_create merchant_id=, feed_label=`). На наявній PMax поле незмінне — для зміни лише перестворення. `mutate_campaign_set_merchant` пробує update, але Google зазвичай відхиляє.
-2. **Listing group filter** рідко = «всі товари». Часто дерево по custom_label: `pmax_asset_group_set_listing_filter(custom_label_index, include_values, exclude_others)`. Вимоги API: `listing_source=SHOPPING` на КОЖНОМУ вузлі; кожен SUBDIVISION мусить мати вузол «everything else» (у нас — UNIT_EXCLUDED з порожнім value).
-3. **Автозгенеровані асети** (`asset.source = AUTOMATICALLY_CREATED`) НЕ лінкуються вручну (CANNOT_LINK_TO_AUTOMATICALLY_CREATED_ASSET). При копіюванні медіа фільтрувати тільки `ADVERTISER`.
-4. **Asset-group persona-аудиторії** (`audience.scope = ASSET_GROUP`, ім'я AssetGroupPersona_*) не перевикористовуються — відтворювати через `audiences_create` з тим самим складом segments і чіпляти як сигнал.
-5. **Конверсійні цілі**: якщо `conversion_goal_campaign_config.custom_conversion_goal` порожній — кампанія на акаунт-дефолтних цілях, кастомну НЕ чіпляти.
-6. **Geo-тип PMax** дефолтний PRESENCE_OR_INTEREST — якщо оригінал PRESENCE, ставити явно через `mutate_campaign_update_settings positive_geo_target_type=PRESENCE`.
-7. **Asset automation** (Image extraction/enhancement, Video enhancement) — звіряти `campaign.asset_automation_settings` і виставляти через `mutate_campaign_update_settings image_extraction/image_enhancement/video_enhancement`.
-8. PMax опис: хоча б один ≤60 символів (інакше NOT_ENOUGH / помилка).
-
-## Retail PMax — ще два нюанси (доповнення)
-
-9. **Conversion goals «Campaign-specific»**: якщо `conversion_goal_campaign_config.goal_config_level = CAMPAIGN`, а `custom_conversion_goal` порожній — це стандартні категорійні цілі на рівні кампанії (напр. лише Purchases biddable). Виставляти через `mutate_campaign_set_conversion_goals(biddable_categories=["PURCHASE"])` (перемикає рівень на CAMPAIGN + робить biddable лише вказані категорії). НЕ плутати з custom goal (окремий тул).
-10. **LANDSCAPE_LOGO**: у Brand Guidelines окрім LOGO (1:1) буває LANDSCAPE_LOGO (4:1). Обидва — окремі campaign_asset field types; копіювати обидва через `extensions_attach_assets`.
+1. **Merchant Center id / feed_label** can only be set at creation time
+   (`pmax_campaign_create merchant_id=, feed_label=`). On an existing PMax
+   campaign the field is immutable — changing it means recreating the
+   campaign. `mutate_campaign_set_merchant` attempts an update, but Google
+   usually rejects it.
+2. **Listing group filters** are rarely "all products". Trees subdivided by
+   a custom label are common: use `pmax_asset_group_set_listing_filter`
+   with `custom_label_index`, `include_values` and `exclude_others`.
+   API requirements: `listing_source=SHOPPING` on EVERY
+   node, and every SUBDIVISION must have an "everything else" node — the
+   tool creates it as UNIT_EXCLUDED with an empty value.
+3. **Automatically created assets** (`asset.source = AUTOMATICALLY_CREATED`)
+   cannot be linked manually
+   (CANNOT_LINK_TO_AUTOMATICALLY_CREATED_ASSET). When copying media, filter
+   to `ADVERTISER` assets only.
+4. **Asset-group persona audiences** (`audience.scope = ASSET_GROUP`, names
+   like AssetGroupPersona_*) are not reusable — recreate them via
+   `audiences_create` with the same segment composition and attach as a
+   signal.
+5. **Conversion goals**: if
+   `conversion_goal_campaign_config.custom_conversion_goal` is empty, the
+   campaign uses account-default goals — do not attach a custom goal.
+6. **PMax geo type** defaults to PRESENCE_OR_INTEREST — if the template
+   uses PRESENCE, set it explicitly via
+   `mutate_campaign_update_settings positive_geo_target_type=PRESENCE`.
+7. **Asset automation** (image extraction/enhancement, video enhancement) —
+   compare `campaign.asset_automation_settings` and set the
+   `image_extraction`, `image_enhancement` and `video_enhancement` options
+   via `mutate_campaign_update_settings`.
+8. **PMax descriptions**: at least one must be 60 characters or shorter.
+9. **Campaign-specific standard goals**: if
+   `conversion_goal_campaign_config.goal_config_level = CAMPAIGN` and
+   `custom_conversion_goal` is empty, the campaign uses standard category
+   goals at campaign level (for example, only Purchases biddable). Set this
+   via `mutate_campaign_set_conversion_goals` with
+   `biddable_categories=["PURCHASE"]`, which switches the level to CAMPAIGN
+   and makes only the listed categories biddable. Do not confuse this with
+   a custom goal (a separate tool).
+10. **LANDSCAPE_LOGO**: Brand Guidelines can include a LANDSCAPE_LOGO (4:1)
+    in addition to LOGO (1:1). They are separate campaign asset field
+    types; copy both via `extensions_attach_assets`.

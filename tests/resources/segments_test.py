@@ -18,10 +18,15 @@ import unittest
 import urllib.request
 from unittest import mock
 
+from ads_mcp.resources import fetch_cache
 from ads_mcp.resources import segments
 
 
 class SegmentsTest(unittest.TestCase):
+    def setUp(self):
+        fetch_cache.clear_cache()
+        self.addCleanup(fetch_cache.clear_cache)
+
     @mock.patch("urllib.request.urlopen")
     def test_get_segments(self, mock_urlopen):
         # Setup mock response
@@ -38,7 +43,7 @@ class SegmentsTest(unittest.TestCase):
 
         # Verify urlopen was called correctly
         mock_urlopen.assert_called_once()
-        args, _ = mock_urlopen.call_args
+        args, kwargs = mock_urlopen.call_args
         request_obj = args[0]
 
         self.assertIsInstance(request_obj, urllib.request.Request)
@@ -47,3 +52,22 @@ class SegmentsTest(unittest.TestCase):
             "https://developers.google.com/google-ads/api/fields/latest/segments",
         )
         self.assertEqual(request_obj.headers.get("User-agent"), "Mozilla/5.0")
+        self.assertEqual(kwargs.get("timeout"), 30)
+
+    @mock.patch("urllib.request.urlopen")
+    def test_second_read_is_cached_until_cleared(self, mock_urlopen):
+        mock_response = mock.MagicMock()
+        mock_response.read.return_value = b"Mock segments content"
+        mock_response.__enter__.return_value = mock_response
+        mock_urlopen.return_value = mock_response
+
+        first = segments.get_segments()
+        second = segments.get_segments()
+
+        self.assertEqual(first, second)
+        mock_urlopen.assert_called_once()
+
+        fetch_cache.clear_cache()
+        segments.get_segments()
+
+        self.assertEqual(mock_urlopen.call_count, 2)

@@ -41,3 +41,10 @@ coverage.xml
 # macOS
 .DS_Store
 
+# Credentials — never commit these
+client_secret*.json
+google-ads.yaml
+.env
+application_default_credentials.json
+credentials.json
+

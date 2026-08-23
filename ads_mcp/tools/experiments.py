@@ -9,10 +9,11 @@ campaign) -> edit the treatment campaign with the regular tools ->
 experiment_end or experiment_promote.
 
 Safety model: ``confirm=False`` = preview only (experiment scheduling has
-side effects that validate_only cannot fully cover, so nothing is sent).
+side effects that validate_only cannot fully cover, so nothing is sent to
+Google Ads and nothing is validated).
 """
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
 from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
@@ -48,9 +49,10 @@ def experiment_create(
 
     Google copies the control campaign into a treatment campaign and splits
     traffic. After creation, modify the treatment campaign with the regular
-    tools (find its id via experiment_list), then end or promote.
+    tools (find its id via experiments_list), then end or promote.
 
-    SAFETY: with confirm=false nothing is sent to Google.
+    SAFETY: with confirm=false nothing is sent to Google Ads, so the preview
+    is computed locally and nothing is validated.
 
     Args:
         customer_id: The client account id (digits only, no hyphens).
@@ -78,7 +80,9 @@ def experiment_create(
         "experiment_type": experiment_type,
     }
     if not confirm:
-        return _preview_or_done(False, "experiments_create", preview)
+        return _preview_or_done(
+            False, "experiments_create", preview, validated=False
+        )
 
     client = utils.get_googleads_client()
     exp_service = utils.get_googleads_service("ExperimentService")
@@ -146,24 +150,37 @@ def experiment_create(
 @experiments_mcp.tool(annotations=_READ)
 def experiments_list(
     customer_id: str,
-) -> List[Dict[str, Any]]:
+    limit: int = 50,
+) -> Dict[str, Any]:
     """Lists experiments with status and their arm campaigns.
+
+    Returns {"experiments": [...], "returned": n, "truncated": bool} —
+    ``truncated`` is true when more experiments exist than were returned.
+    The arms of every returned experiment are always complete.
 
     Args:
         customer_id: The client account id (digits only, no hyphens).
+        limit: Max experiments to return, ordered by name (default 50).
     """
     customer_id = _clean_customer_id(customer_id)
+    limit = max(int(limit), 1)
     ga_service = utils.get_googleads_service("GoogleAdsService")
     try:
-        exp_rows = ga_service.search(
-            customer_id=customer_id,
-            query=(
-                "SELECT experiment.experiment_id, experiment.name, "
-                "experiment.status, experiment.type, experiment.start_date, "
-                "experiment.end_date FROM experiment "
-                "WHERE experiment.status != 'REMOVED'"
-            ),
+        # One row over the limit only reveals that more exist; it is dropped.
+        exp_rows = list(
+            ga_service.search(
+                customer_id=customer_id,
+                query=(
+                    "SELECT experiment.experiment_id, experiment.name, "
+                    "experiment.status, experiment.type, "
+                    "experiment.start_date, experiment.end_date "
+                    "FROM experiment "
+                    "WHERE experiment.status != 'REMOVED' "
+                    f"ORDER BY experiment.name LIMIT {limit + 1}"
+                ),
+            )
         )
+        truncated = len(exp_rows) > limit
         experiments = {
             str(r.experiment.experiment_id): {
                 "id": str(r.experiment.experiment_id),
@@ -174,28 +191,41 @@ def experiments_list(
                 "end_date": r.experiment.end_date,
                 "arms": [],
             }
-            for r in exp_rows
+            for r in exp_rows[:limit]
         }
-        arm_rows = ga_service.search(
-            customer_id=customer_id,
-            query=(
-                "SELECT experiment_arm.experiment, experiment_arm.name, "
-                "experiment_arm.control, experiment_arm.traffic_split, "
-                "experiment_arm.campaigns FROM experiment_arm"
-            ),
-        )
-        for r in arm_rows:
-            exp_id = r.experiment_arm.experiment.split("/")[-1]
-            if exp_id in experiments:
-                experiments[exp_id]["arms"].append(
-                    {
-                        "name": r.experiment_arm.name,
-                        "control": r.experiment_arm.control,
-                        "traffic_split": r.experiment_arm.traffic_split,
-                        "campaigns": list(r.experiment_arm.campaigns),
-                    }
-                )
-        return list(experiments.values())
+        if experiments:
+            # Scoped to the listed experiments instead of capped by rows: a
+            # row cap here would silently drop arms of a listed experiment.
+            wanted = ", ".join(
+                f"'customers/{customer_id}/experiments/"
+                f"{utils.gaql_id(exp_id)}'"
+                for exp_id in experiments
+            )
+            arm_rows = ga_service.search(
+                customer_id=customer_id,
+                query=(
+                    "SELECT experiment_arm.experiment, experiment_arm.name, "
+                    "experiment_arm.control, experiment_arm.traffic_split, "
+                    "experiment_arm.campaigns FROM experiment_arm "
+                    f"WHERE experiment_arm.experiment IN ({wanted})"
+                ),
+            )
+            for r in arm_rows:
+                exp_id = r.experiment_arm.experiment.split("/")[-1]
+                if exp_id in experiments:
+                    experiments[exp_id]["arms"].append(
+                        {
+                            "name": r.experiment_arm.name,
+                            "control": r.experiment_arm.control,
+                            "traffic_split": r.experiment_arm.traffic_split,
+                            "campaigns": list(r.experiment_arm.campaigns),
+                        }
+                    )
+        return {
+            "experiments": list(experiments.values()),
+            "returned": len(experiments),
+            "truncated": truncated,
+        }
     except GoogleAdsException as ex:
         _raise_tool_error(ex)
 
@@ -211,7 +241,8 @@ def experiment_end(
     """Ends a running experiment (treatment campaign stops serving,
     control gets 100% traffic back).
 
-    SAFETY: with confirm=false nothing is sent.
+    SAFETY: with confirm=false nothing is sent to Google Ads, so the preview
+    is computed locally and nothing is validated.
 
     Args:
         customer_id: The client account id (digits only, no hyphens).
@@ -224,14 +255,14 @@ def experiment_end(
         "experiment_id": str(experiment_id),
     }
     if not confirm:
-        return _preview_or_done(False, "experiments_end", details)
+        return _preview_or_done(
+            False, "experiments_end", details, validated=False
+        )
 
     client = utils.get_googleads_client()
     exp_service = utils.get_googleads_service("ExperimentService")
     request = client.get_type("EndExperimentRequest")
-    request.experiment = (
-        f"customers/{customer_id}/experiments/{experiment_id}"
-    )
+    request.experiment = f"customers/{customer_id}/experiments/{experiment_id}"
     try:
         exp_service.end_experiment(request=request)
     except GoogleAdsException as ex:
@@ -250,7 +281,8 @@ def experiment_promote(
     """Promotes a winning experiment: treatment settings are applied to the
     original campaign. IRREVERSIBLE.
 
-    SAFETY: with confirm=false nothing is sent.
+    SAFETY: with confirm=false nothing is sent to Google Ads, so the preview
+    is computed locally and nothing is validated.
 
     Args:
         customer_id: The client account id (digits only, no hyphens).
@@ -263,7 +295,9 @@ def experiment_promote(
         "experiment_id": str(experiment_id),
     }
     if not confirm:
-        return _preview_or_done(False, "experiments_promote", details)
+        return _preview_or_done(
+            False, "experiments_promote", details, validated=False
+        )
 
     client = utils.get_googleads_client()
     exp_service = utils.get_googleads_service("ExperimentService")

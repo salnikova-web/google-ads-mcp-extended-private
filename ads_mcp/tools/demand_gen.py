@@ -22,16 +22,14 @@ Safety model: identical to ads_mcp.tools.mutate — every write tool accepts
 ``confirm`` (default ``False`` = validate_only dry-run preview).
 """
 
-import os
-import urllib.request
 from typing import Any, Dict, List, Optional
 
 from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
 from mcp.types import ToolAnnotations
 from google.ads.googleads.errors import GoogleAdsException
-from google.api_core import protobuf_helpers
 
+import ads_mcp.safe_fetch as safe_fetch
 import ads_mcp.utils as utils
 from ads_mcp.tools.mutate import (
     _clean_customer_id,
@@ -81,29 +79,15 @@ def asset_upload_image(
     Args:
         customer_id: The client account id (digits only, no hyphens).
         asset_name: Unique name for the asset in the account.
-        image_source: HTTPS URL of the image OR an absolute local file path.
-            JPEG/PNG, max 5 MB. Recommended sizes: landscape 1200x628,
+        image_source: HTTPS URL of the image. An absolute local file path is
+            only read when the server has GOOGLE_ADS_MCP_ALLOW_LOCAL_FILES=1
+            set. JPEG/PNG, max 5 MB. Recommended sizes: landscape 1200x628,
             square 1200x1200, logo 1200x1200.
         confirm: False = dry-run preview (default), True = apply.
     """
     customer_id = _clean_customer_id(customer_id)
 
-    if image_source.startswith(("http://", "https://")):
-        try:
-            with urllib.request.urlopen(image_source, timeout=30) as r:
-                data = r.read()
-        except Exception as e:
-            raise ToolError(f"Could not download image: {e}")
-    else:
-        if not os.path.isfile(image_source):
-            raise ToolError(f"File not found: {image_source}")
-        with open(image_source, "rb") as f:
-            data = f.read()
-
-    if len(data) > _MAX_IMAGE_BYTES:
-        raise ToolError(
-            f"Image is {len(data)} bytes; Google Ads limit is 5 MB"
-        )
+    data = safe_fetch.read_image_source(image_source, _MAX_IMAGE_BYTES)
 
     client = utils.get_googleads_client()
     asset_service = utils.get_googleads_service("AssetService")
@@ -205,7 +189,7 @@ def list_assets(
     ga_service = utils.get_googleads_service("GoogleAdsService")
     where = f"WHERE asset.type = '{asset_type}'"
     if name_contains:
-        where += f" AND asset.name LIKE '%{name_contains}%'"
+        where += f" AND asset.name LIKE '%{utils.gaql_str(name_contains)}%'"
     query = (
         "SELECT asset.id, asset.name, asset.type, "
         "asset.youtube_video_asset.youtube_video_id "
@@ -253,8 +237,9 @@ def campaign_create(
     custom goal with campaign_set_custom_conversion_goal right after.
 
     Demand Gen serves across YouTube (in-feed, Shorts, in-stream), Discover
-    and Gmail. Note: per-channel controls are not yet exposed by the API
-    client version in use — campaigns run on all DG channels.
+    and Gmail. Note: channel controls are set per AD GROUP, not on the
+    campaign — restrict placements with ad_group_create(channels=...) or
+    ad_group_update_channels.
 
     SAFETY: dry-run by default (validate_only); re-run with confirm=true.
     Created PAUSED unless status="ENABLED".
@@ -407,32 +392,34 @@ def campaign_update_bidding(
     Args:
         customer_id: The client account id (digits only, no hyphens).
         campaign_id: The numeric id of the campaign.
-        target_cpa: New target CPA in account currency.
-        target_roas: New target ROAS as decimal (3.5 = 350%).
+        target_cpa: New target CPA in account currency (must be positive).
+        target_roas: New target ROAS as decimal (3.5 = 350%, must be
+            positive).
         confirm: False = dry-run preview (default), True = apply.
     """
     customer_id = _clean_customer_id(customer_id)
     if (target_cpa is None) == (target_roas is None):
         raise ToolError("Pass exactly one of target_cpa or target_roas")
+    # A zero target would leave the bidding submessage at its proto default
+    # and the update would silently do nothing; reject it instead.
+    if target_cpa is not None and target_cpa <= 0:
+        raise ToolError("target_cpa must be positive")
+    if target_roas is not None and target_roas <= 0:
+        raise ToolError("target_roas must be positive")
 
     client = utils.get_googleads_client()
     campaign_service = utils.get_googleads_service("CampaignService")
 
     operation = client.get_type("CampaignOperation")
     campaign = operation.update
-    campaign.resource_name = (
-        f"customers/{customer_id}/campaigns/{campaign_id}"
-    )
+    campaign.resource_name = f"customers/{customer_id}/campaigns/{campaign_id}"
     if target_cpa is not None:
-        campaign.maximize_conversions.target_cpa_micros = _to_micros(
-            target_cpa
-        )
+        campaign.maximize_conversions.target_cpa_micros = _to_micros(target_cpa)
+        path = "maximize_conversions.target_cpa_micros"
     else:
         campaign.maximize_conversion_value.target_roas = float(target_roas)
-    client.copy_from(
-        operation.update_mask,
-        protobuf_helpers.field_mask(None, campaign._pb),
-    )
+        path = "maximize_conversion_value.target_roas"
+    operation.update_mask.paths.append(path)
 
     request = client.get_type("MutateCampaignsRequest")
     request.customer_id = customer_id
@@ -452,17 +439,26 @@ def campaign_update_bidding(
     }
     if confirm:
         details["updated_resource"] = response.results[0].resource_name
-    return _preview_or_done(confirm, "demandgen_campaign_update_bidding", details)
+    return _preview_or_done(
+        confirm, "demandgen_campaign_update_bidding", details
+    )
 
 
-_DG_CHANNELS = (
-    "YOUTUBE_IN_STREAM",
-    "YOUTUBE_IN_FEED",
-    "YOUTUBE_SHORTS",
-    "DISCOVER",
-    "GMAIL",
-    "DISPLAY",
-)
+# Public channel name -> the matching bool on
+# DemandGenChannelControls.selected_channels. Single source of truth so the
+# update mask below cannot drift from what _apply_channels actually sets.
+_DG_CHANNEL_FIELDS = {
+    "YOUTUBE_IN_STREAM": "youtube_in_stream",
+    "YOUTUBE_IN_FEED": "youtube_in_feed",
+    "YOUTUBE_SHORTS": "youtube_shorts",
+    "DISCOVER": "discover",
+    "GMAIL": "gmail",
+    "DISPLAY": "display",
+}
+
+_DG_CHANNELS = tuple(_DG_CHANNEL_FIELDS)
+
+_CHANNEL_CONTROLS = "demand_gen_ad_group_settings.channel_controls"
 
 
 def _apply_channels(client, ad_group, channels: List[str]) -> None:
@@ -475,12 +471,8 @@ def _apply_channels(client, ad_group, channels: List[str]) -> None:
         client.enums.DemandGenChannelConfigEnum.SELECTED_CHANNELS
     )
     sel = cc.selected_channels
-    sel.youtube_in_stream = "YOUTUBE_IN_STREAM" in channels
-    sel.youtube_in_feed = "YOUTUBE_IN_FEED" in channels
-    sel.youtube_shorts = "YOUTUBE_SHORTS" in channels
-    sel.discover = "DISCOVER" in channels
-    sel.gmail = "GMAIL" in channels
-    sel.display = "DISPLAY" in channels
+    for channel, field in _DG_CHANNEL_FIELDS.items():
+        setattr(sel, field, channel in channels)
 
 
 @demandgen_mcp.tool(annotations=_WRITE)
@@ -600,9 +592,7 @@ def ad_group_update_channels(
 
     operation = client.get_type("AdGroupOperation")
     ad_group = operation.update
-    ad_group.resource_name = (
-        f"customers/{customer_id}/adGroups/{ad_group_id}"
-    )
+    ad_group.resource_name = f"customers/{customer_id}/adGroups/{ad_group_id}"
     if channel_strategy:
         channel_strategy = channel_strategy.upper()
         if channel_strategy not in (
@@ -620,12 +610,21 @@ def ad_group_update_channels(
         cc.channel_strategy = client.enums.DemandGenChannelStrategyEnum[
             channel_strategy
         ]
+        paths = [
+            f"{_CHANNEL_CONTROLS}.channel_config",
+            f"{_CHANNEL_CONTROLS}.channel_strategy",
+        ]
     else:
         _apply_channels(client, ad_group, channels)
-    client.copy_from(
-        operation.update_mask,
-        protobuf_helpers.field_mask(None, ad_group._pb),
-    )
+        # Every channel leaf has to be listed, including the ones set to
+        # False: a mask derived from the populated message would omit them
+        # and a channel could never be turned off. Leaf paths only — the
+        # API rejects the non-leaf parent with FIELD_HAS_SUBFIELDS.
+        paths = [f"{_CHANNEL_CONTROLS}.channel_config"] + [
+            f"{_CHANNEL_CONTROLS}.selected_channels.{field}"
+            for field in _DG_CHANNEL_FIELDS.values()
+        ]
+    operation.update_mask.paths.extend(paths)
 
     request = client.get_type("MutateAdGroupsRequest")
     request.customer_id = customer_id
@@ -641,7 +640,8 @@ def ad_group_update_channels(
         "customer_id": customer_id,
         "ad_group_id": str(ad_group_id),
         "new_channels": (
-            channel_strategy if channel_strategy
+            channel_strategy
+            if channel_strategy
             else [c.upper() for c in channels]
         ),
     }
@@ -857,8 +857,10 @@ def ad_create_video(
 
     call_to_action: optional CTA button, one of Google's enum values
     (e.g. LEARN_MORE, SIGN_UP, GET_STARTED, SUBSCRIBE, DOWNLOAD, SHOP_NOW,
-    BOOK_NOW, CONTACT_US, APPLY_NOW). On dry-run the CTA asset is not
-    created; it is created and linked when confirm=true.
+    BOOK_NOW, CONTACT_US, APPLY_NOW). The value is checked against the enum
+    on dry-run too, but the CTA asset itself is only created and linked when
+    confirm=true — so the dry-run validates the ad payload WITHOUT the CTA
+    asset link and does not fully cover what gets applied.
 
     Register videos first with asset_create_youtube_video and pass their
     asset ids. SAFETY: dry-run by default (validate_only); re-run with
@@ -909,6 +911,15 @@ def ad_create_video(
     client = utils.get_googleads_client()
     ad_service = utils.get_googleads_service("AdGroupAdService")
 
+    # Resolved before the confirm branch so a mistyped CTA fails on dry-run
+    # instead of only when the ad is applied.
+    cta_enum = None
+    if call_to_action:
+        try:
+            cta_enum = client.enums.CallToActionTypeEnum[call_to_action.upper()]
+        except KeyError:
+            raise ToolError(f"Unknown call_to_action: {call_to_action}")
+
     operation = client.get_type("AdGroupAdOperation")
     ad_group_ad = operation.create
     ad_group_ad.ad_group = f"customers/{customer_id}/adGroups/{ad_group_id}"
@@ -936,12 +947,7 @@ def ad_create_video(
         img.asset = _asset_rn(customer_id, asset_id)
         dg.logo_images.append(img)
 
-    if call_to_action and confirm:
-        cta_key = call_to_action.upper()
-        try:
-            cta_enum = client.enums.CallToActionTypeEnum[cta_key]
-        except KeyError:
-            raise ToolError(f"Unknown call_to_action: {call_to_action}")
+    if cta_enum is not None and confirm:
         asset_service = utils.get_googleads_service("AssetService")
         a_op = client.get_type("AssetOperation")
         cta_asset = a_op.create
@@ -1107,9 +1113,7 @@ def ad_update_asset_optimization(
         aa.asset_automation_type = auto_type
         aa.asset_automation_status = auto_status
         ad_group_ad.ad_group_ad_asset_automation_settings.append(aa)
-    operation.update_mask.paths.append(
-        "ad_group_ad_asset_automation_settings"
-    )
+    operation.update_mask.paths.append("ad_group_ad_asset_automation_settings")
 
     request = client.get_type("MutateAdGroupAdsRequest")
     request.customer_id = customer_id
@@ -1131,8 +1135,9 @@ def ad_update_asset_optimization(
     }
     if confirm:
         details["updated_resource"] = response.results[0].resource_name
-    return _preview_or_done(confirm, "demandgen_ad_update_asset_optimization",
-                            details)
+    return _preview_or_done(
+        confirm, "demandgen_ad_update_asset_optimization", details
+    )
 
 
 @demandgen_mcp.tool(annotations=_WRITE)
@@ -1325,9 +1330,7 @@ def campaign_set_targeting_level(
         "customer_id": customer_id,
         "campaign_id": str(campaign_id),
         "upgraded_targeting": bool(upgraded_targeting),
-        "targeting_level": (
-            "AD_GROUP" if upgraded_targeting else "CAMPAIGN"
-        ),
+        "targeting_level": ("AD_GROUP" if upgraded_targeting else "CAMPAIGN"),
     }
     if confirm:
         details["updated_resource"] = response.results[0].resource_name

@@ -33,7 +33,6 @@ from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
 from mcp.types import ToolAnnotations
 from google.ads.googleads.errors import GoogleAdsException
-from google.api_core import protobuf_helpers
 
 import ads_mcp.utils as utils
 from ads_mcp.tools.mutate import (
@@ -273,8 +272,9 @@ def campaign_update_bidding(
 ) -> Dict[str, Any]:
     """Updates the bidding target (tCPA or tROAS) of a PMax campaign.
 
-    Pass exactly one of target_cpa / target_roas. SAFETY: dry-run by
-    default; re-run with confirm=true.
+    Pass exactly one of target_cpa / target_roas; the target must be
+    positive (a target cannot be cleared here — switch the strategy
+    instead). SAFETY: dry-run by default; re-run with confirm=true.
 
     Args:
         customer_id: The client account id (digits only, no hyphens).
@@ -286,6 +286,10 @@ def campaign_update_bidding(
     customer_id = _clean_customer_id(customer_id)
     if (target_cpa is None) == (target_roas is None):
         raise ToolError("Pass exactly one of target_cpa or target_roas")
+    if target_cpa is not None and target_cpa <= 0:
+        raise ToolError("target_cpa must be positive")
+    if target_roas is not None and target_roas <= 0:
+        raise ToolError("target_roas must be positive")
 
     client = utils.get_googleads_client()
     campaign_service = utils.get_googleads_service("CampaignService")
@@ -293,14 +297,18 @@ def campaign_update_bidding(
     operation = client.get_type("CampaignOperation")
     campaign = operation.update
     campaign.resource_name = f"customers/{customer_id}/campaigns/{campaign_id}"
+    # An explicit leaf path is required: a value-derived mask drops fields
+    # left at their proto default, so the update would silently no-op.
     if target_cpa is not None:
         campaign.maximize_conversions.target_cpa_micros = _to_micros(target_cpa)
+        operation.update_mask.paths.append(
+            "maximize_conversions.target_cpa_micros"
+        )
     else:
         campaign.maximize_conversion_value.target_roas = float(target_roas)
-    client.copy_from(
-        operation.update_mask,
-        protobuf_helpers.field_mask(None, campaign._pb),
-    )
+        operation.update_mask.paths.append(
+            "maximize_conversion_value.target_roas"
+        )
 
     request = client.get_type("MutateCampaignsRequest")
     request.customer_id = customer_id
@@ -500,14 +508,15 @@ def asset_group_create(
         "operations_count": len(operations),
     }
     if confirm:
-        details["created_asset_group"] = (
-            response.mutate_operation_responses[0]
-            .asset_group_result.resource_name
-        )
+        details["created_asset_group"] = response.mutate_operation_responses[
+            0
+        ].asset_group_result.resource_name
     return _preview_or_done(confirm, "pmax_asset_group_create", details)
 
 
-@pmax_mcp.tool(annotations=_WRITE)
+@pmax_mcp.tool(
+    annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True)
+)
 def asset_group_update(
     customer_id: str,
     asset_group_id: str,
@@ -518,14 +527,14 @@ def asset_group_update(
 ) -> Dict[str, Any]:
     """Updates an asset group: status, name and/or final URL.
 
-    Pass only the fields to change. SAFETY: dry-run by default; re-run with
-    confirm=true.
+    Pass only the fields to change. status="REMOVED" DELETES the asset
+    group. SAFETY: dry-run by default; re-run with confirm=true.
 
     Args:
         customer_id: The client account id (digits only, no hyphens).
         asset_group_id: The numeric id of the asset group.
-        status: Optional: ENABLED, PAUSED or REMOVED.
-        new_name: Optional new name.
+        status: Optional: ENABLED, PAUSED or REMOVED (REMOVED deletes it).
+        new_name: Optional new name (must not be blank).
         final_url: Optional new landing page URL (replaces existing).
         confirm: False = dry-run preview (default), True = apply.
     """
@@ -535,6 +544,8 @@ def asset_group_update(
             "Nothing to update: pass at least one of status, new_name, "
             "final_url"
         )
+    if new_name is not None and not new_name.strip():
+        raise ToolError("new_name must be a non-empty string")
 
     client = utils.get_googleads_client()
     ag_service = utils.get_googleads_service("AssetGroupService")
@@ -561,22 +572,22 @@ def asset_group_update(
             removed["removed_resource"] = response.results[0].resource_name
         return _preview_or_done(confirm, "pmax_asset_group_update", removed)
     ag = operation.update
-    ag.resource_name = (
-        f"customers/{customer_id}/assetGroups/{asset_group_id}"
-    )
+    ag.resource_name = f"customers/{customer_id}/assetGroups/{asset_group_id}"
+    # Explicit leaf paths, built only for the fields actually passed: a
+    # value-derived mask would drop anything left at its proto default (an
+    # empty name), and an unconditional list would wipe untouched fields.
     if status is not None:
         status = status.upper()
         if status not in ("ENABLED", "PAUSED"):
             raise ToolError("status must be ENABLED, PAUSED or REMOVED")
         ag.status = client.enums.AssetGroupStatusEnum[status]
+        operation.update_mask.paths.append("status")
     if new_name is not None:
         ag.name = new_name
+        operation.update_mask.paths.append("name")
     if final_url is not None:
         ag.final_urls.append(final_url)
-    client.copy_from(
-        operation.update_mask,
-        protobuf_helpers.field_mask(None, ag._pb),
-    )
+        operation.update_mask.paths.append("final_urls")
 
     request = client.get_type("MutateAssetGroupsRequest")
     request.customer_id = customer_id
@@ -635,9 +646,7 @@ def asset_group_add_texts(
     client = utils.get_googleads_client()
     ga_service = utils.get_googleads_service("GoogleAdsService")
 
-    asset_group_rn = (
-        f"customers/{customer_id}/assetGroups/{asset_group_id}"
-    )
+    asset_group_rn = f"customers/{customer_id}/assetGroups/{asset_group_id}"
     operations = []
     temp_id = -1
     for text in texts:
@@ -698,6 +707,9 @@ def asset_group_add_media(
         confirm: False = dry-run preview (default), True = apply.
     """
     customer_id = _clean_customer_id(customer_id)
+    # The resource name below is spliced into a GAQL literal, so the id has
+    # to be numeric before it gets there.
+    asset_group_id = utils.gaql_id(asset_group_id)
     field_type = field_type.upper()
     if field_type not in _MEDIA_FIELD_TYPES:
         raise ToolError(f"field_type must be one of {_MEDIA_FIELD_TYPES}")
@@ -707,9 +719,7 @@ def asset_group_add_media(
     client = utils.get_googleads_client()
     ga_service = utils.get_googleads_service("GoogleAdsService")
 
-    asset_group_rn = (
-        f"customers/{customer_id}/assetGroups/{asset_group_id}"
-    )
+    asset_group_rn = f"customers/{customer_id}/assetGroups/{asset_group_id}"
 
     # Enforce the per-asset-group video cap (15) counting assets already
     # linked, so a partial batch doesn't fail cryptically mid-way.
@@ -850,9 +860,7 @@ def signal_attach(
 
     operation = client.get_type("AssetGroupSignalOperation")
     signal = operation.create
-    signal.asset_group = (
-        f"customers/{customer_id}/assetGroups/{asset_group_id}"
-    )
+    signal.asset_group = f"customers/{customer_id}/assetGroups/{asset_group_id}"
     if audience_id is not None:
         signal.audience.audience = (
             f"customers/{customer_id}/audiences/{audience_id}"
@@ -1020,9 +1028,7 @@ def asset_group_set_all_products(
 
     operation = client.get_type("AssetGroupListingGroupFilterOperation")
     lgf = operation.create
-    lgf.asset_group = (
-        f"customers/{customer_id}/assetGroups/{asset_group_id}"
-    )
+    lgf.asset_group = f"customers/{customer_id}/assetGroups/{asset_group_id}"
     lgf.type_ = client.enums.ListingGroupFilterTypeEnum.UNIT_INCLUDED
     lgf.listing_source = (
         client.enums.ListingGroupFilterListingSourceEnum.SHOPPING
@@ -1056,37 +1062,57 @@ def asset_group_set_all_products(
 def list_asset_groups(
     customer_id: str,
     campaign_id: Optional[str] = None,
-) -> List[Dict[str, Any]]:
+    limit: int = 200,
+) -> Dict[str, Any]:
     """Lists PMax asset groups: id, name, status, ad strength, final urls.
+
+    Returns at most `limit` asset groups ordered by name. When the account
+    has more, the list is cut and "truncated" is true — narrow it down with
+    campaign_id or raise limit before concluding an asset group is missing.
 
     Args:
         customer_id: The client account id (digits only, no hyphens).
         campaign_id: Optional: only asset groups of this campaign.
+        limit: Max asset groups returned (default 200).
+
+    Returns:
+        {"asset_groups": [...], "returned": n, "truncated": bool}
     """
     customer_id = _clean_customer_id(customer_id)
+    limit = int(limit)
+    if limit <= 0:
+        raise ToolError("limit must be positive")
     ga_service = utils.get_googleads_service("GoogleAdsService")
 
     where = "WHERE asset_group.status != 'REMOVED'"
     if campaign_id:
         where += f" AND campaign.id = {int(campaign_id)}"
+    # One row over the limit, so a cut list can be reported as such.
     query = (
         "SELECT asset_group.id, asset_group.name, asset_group.status, "
         "asset_group.ad_strength, asset_group.final_urls, campaign.id, "
-        "campaign.name FROM asset_group " + where
+        "campaign.name FROM asset_group " + where + " ORDER BY "
+        f"asset_group.name ASC LIMIT {limit + 1}"
     )
     try:
-        rows = ga_service.search(customer_id=customer_id, query=query)
-        return [
-            {
-                "id": str(row.asset_group.id),
-                "name": row.asset_group.name,
-                "status": row.asset_group.status.name,
-                "ad_strength": row.asset_group.ad_strength.name,
-                "final_urls": list(row.asset_group.final_urls),
-                "campaign_id": str(row.campaign.id),
-                "campaign_name": row.campaign.name,
-            }
-            for row in rows
-        ]
+        rows = list(ga_service.search(customer_id=customer_id, query=query))
     except GoogleAdsException as ex:
         _raise_tool_error(ex)
+
+    asset_groups = [
+        {
+            "id": str(row.asset_group.id),
+            "name": row.asset_group.name,
+            "status": row.asset_group.status.name,
+            "ad_strength": row.asset_group.ad_strength.name,
+            "final_urls": list(row.asset_group.final_urls),
+            "campaign_id": str(row.campaign.id),
+            "campaign_name": row.campaign.name,
+        }
+        for row in rows[:limit]
+    ]
+    return {
+        "asset_groups": asset_groups,
+        "returned": len(asset_groups),
+        "truncated": len(rows) > limit,
+    }

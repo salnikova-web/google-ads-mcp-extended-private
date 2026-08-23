@@ -21,7 +21,7 @@ Safety model: identical to ads_mcp.tools.mutate — every write tool accepts
 ``confirm`` (default ``False`` = validate_only dry-run preview).
 """
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
@@ -352,22 +352,32 @@ def remove_campaign_asset(
     }
     if confirm:
         details["removed_resource"] = response.results[0].resource_name
-    return _preview_or_done(confirm, "extensions_remove_campaign_asset", details)
+    return _preview_or_done(
+        confirm, "extensions_remove_campaign_asset", details
+    )
 
 
 @extensions_mcp.tool(annotations=_READ)
 def list_campaign_assets(
     customer_id: str,
     campaign_id: str,
-) -> List[Dict[str, Any]]:
+    limit: int = 200,
+) -> Dict[str, Any]:
     """Lists extension assets linked to a campaign (sitelinks, callouts,
     snippets) with asset ids needed for removal.
+
+    Returns {"items": [...], "returned": n, "truncated": bool}. When
+    truncated is true the campaign has more linked assets than limit, so an
+    asset missing from items means "not listed", NOT "not linked" — raise
+    limit before concluding an asset is already unlinked.
 
     Args:
         customer_id: The client account id (digits only, no hyphens).
         campaign_id: The numeric id of the campaign.
+        limit: Max assets returned (default 200).
     """
     customer_id = _clean_customer_id(customer_id)
+    cap = int(limit)
     ga_service = utils.get_googleads_service("GoogleAdsService")
     query = (
         "SELECT campaign_asset.asset, campaign_asset.field_type, "
@@ -378,7 +388,11 @@ def list_campaign_assets(
         f"WHERE campaign.id = {int(campaign_id)} "
         "AND campaign_asset.field_type IN "
         "('SITELINK', 'CALLOUT', 'STRUCTURED_SNIPPET') "
-        "AND campaign_asset.status != 'REMOVED'"
+        "AND campaign_asset.status != 'REMOVED' "
+        "ORDER BY asset.id "
+        # One row past the cap: reading it back is how truncation is
+        # detected, so the cut is reported instead of silently applied.
+        f"LIMIT {cap + 1}"
     )
     try:
         rows = ga_service.search(customer_id=customer_id, query=query)
@@ -398,6 +412,12 @@ def list_campaign_assets(
                     "status": row.campaign_asset.status.name,
                 }
             )
-        return out
+        truncated = len(out) > cap
+        items = out[:cap]
+        return {
+            "items": items,
+            "returned": len(items),
+            "truncated": truncated,
+        }
     except GoogleAdsException as ex:
         _raise_tool_error(ex)

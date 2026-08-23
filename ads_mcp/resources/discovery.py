@@ -14,9 +14,12 @@
 
 """Discovery document resource."""
 
-import urllib.request
-
 from ads_mcp.coordinator import mcp
+from ads_mcp.resources import fetch_cache
+
+# The v24 discovery JSON is already multiple megabytes, so the cap leaves
+# generous headroom before a response is treated as runaway.
+_MAX_RESPONSE_BYTES = 64 * 1024 * 1024
 
 
 @mcp.resource(
@@ -39,9 +42,4 @@ def get_discovery_document() -> str:
         str: The discovery document in JSON format.
     """
     url = "https://googleads.googleapis.com/$discovery/rest?version=v24"
-    req = urllib.request.Request(
-        url,
-        headers={"User-Agent": "Mozilla/5.0"},
-    )
-    with urllib.request.urlopen(req) as response:
-        return response.read().decode("utf-8")
+    return fetch_cache.fetch_text(url, _MAX_RESPONSE_BYTES)

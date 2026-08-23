@@ -26,26 +26,73 @@ from google.ads.googleads.v24.services.services.google_ads_service import (
     GoogleAdsServiceClient,
 )
 
+from fastmcp.exceptions import ToolError
 from google.ads.googleads.util import get_nested_attr
 import google.auth
 from ads_mcp.mcp_header_interceptor import MCPHeaderInterceptor
+import collections
+import hashlib
 import os
 import importlib.resources
 import contextlib
+import re
 import subprocess
+import threading
+import time
 from unittest.mock import patch
 
 # filename for generated field information used by search
 _GAQL_FILENAME = "gaql_resources.txt"
 
 logger = logging.getLogger(__name__)
-logging.basicConfig(level=logging.INFO)
+# No basicConfig here: configuring the root logger is the host application's
+# job. Doing it at import time would hijack logging for the whole process, and
+# under the stdio transport anything written to stdout corrupts the JSON-RPC
+# stream. A NullHandler keeps library logging silent until a host configures it.
+logger.addHandler(logging.NullHandler())
 logging.getLogger("httpx").setLevel(logging.WARNING)
 
 # OAuth scope for the Google Ads API. Google Ads does not publish a separate
 # read-only scope; access is restricted to read methods by the tools this
 # server exposes (see ads_mcp/tools/).
 _ADS_SCOPE = "https://www.googleapis.com/auth/adwords"
+
+
+# --- GAQL literal helpers ---------------------------------------------------
+#
+# GAQL string literals are single-quoted, so any user-supplied value spliced
+# into a query must have backslashes and quotes escaped, or an apostrophe ends
+# the literal and the rest of the value is parsed as query syntax.
+
+_GAQL_CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f]")
+_DIGITS_ONLY = re.compile(r"\A[0-9]+\Z")
+
+
+def gaql_str(value: Any) -> str:
+    """Escapes a value for use inside a single-quoted GAQL string literal.
+
+    Returns the escaped *inner* text; the caller keeps its own quotes::
+
+        f"WHERE campaign.name = '{utils.gaql_str(name)}'"
+    """
+    text = str(value)
+    if _GAQL_CONTROL_CHARS.search(text):
+        raise ToolError(
+            "Value contains control characters and cannot be used in a query."
+        )
+    return text.replace("\\", "\\\\").replace("'", "\\'")
+
+
+def gaql_id(value: Any) -> str:
+    """Returns a numeric id as a string, rejecting anything else.
+
+    Used for ids that end up inside resource names or query conditions, where
+    a non-numeric value would be an injection vector.
+    """
+    text = str(value).strip()
+    if not _DIGITS_ONLY.match(text):
+        raise ToolError(f"Expected a numeric id, got: {value!r}")
+    return text
 
 
 @contextlib.contextmanager
@@ -97,7 +144,7 @@ def _get_login_customer_id() -> str | None:
     return os.environ.get("GOOGLE_ADS_LOGIN_CUSTOMER_ID")
 
 
-def _get_googleads_client() -> GoogleAdsClient:
+def _build_googleads_client() -> GoogleAdsClient:
     args = {
         "credentials": _create_credentials(),
         "developer_token": _get_developer_token(),
@@ -115,13 +162,132 @@ def _get_googleads_client() -> GoogleAdsClient:
     return client
 
 
+# --- client / service cache -------------------------------------------------
+#
+# Building a client per call re-reads Application Default Credentials from disk
+# (and on Windows shells out to gcloud) and opens a fresh gRPC channel, which
+# a single tool call may do three times over. Clients and services are cached
+# instead, keyed by the identity of the credentials they were built with.
+#
+# Correctness rules this cache must never break:
+#   * The key always includes the caller's identity. Under the HTTP transport
+#     each request carries its own OAuth token, and a client built for one
+#     token must never serve another user, so the key is recomputed on every
+#     call and carries a hash of that token (never the token itself).
+#   * Only clients and service stubs are cached. Values returned by
+#     ``get_type`` are fresh, mutable protos that tools fill in; sharing one
+#     across calls would let concurrent requests corrupt each other's payloads.
+
+_CACHE_MAX_ENTRIES = 64
+# Comfortably below the ~1h lifetime of a Google OAuth access token, so an
+# entry is retired before the token it was built from expires.
+_CACHE_TTL_SECONDS = 45 * 60
+
+_cache_lock = threading.Lock()
+_cache: "collections.OrderedDict[tuple, tuple[float, Any]]" = (
+    collections.OrderedDict()
+)
+
+
+def _credential_identity() -> tuple:
+    """Returns a cache key fragment identifying the current caller.
+
+    Under the HTTP transport this is a hash of the request's access token;
+    under stdio there is no token and Application Default Credentials (which
+    refresh themselves) are the single identity.
+    """
+    try:
+        from fastmcp.server.dependencies import get_access_token
+
+        token_obj = get_access_token()
+    except Exception:  # no request context, or no auth configured
+        token_obj = None
+
+    if token_obj and token_obj.token:
+        digest = hashlib.sha256(token_obj.token.encode("utf-8")).hexdigest()
+        return ("oauth", digest)
+    return ("adc",)
+
+
+def _close_quietly(value: Any) -> None:
+    """Closes a cached service's transport, ignoring failures."""
+    transport = getattr(value, "transport", None)
+    close = getattr(transport, "close", None)
+    if close is None:
+        return
+    try:
+        close()
+    except Exception:  # pragma: no cover - best-effort cleanup
+        logger.debug("Failed to close a cached transport", exc_info=True)
+
+
+def _cache_get(key: tuple) -> Any:
+    now = time.monotonic()
+    with _cache_lock:
+        entry = _cache.get(key)
+        if entry is None:
+            return None
+        created, value = entry
+        if now - created > _CACHE_TTL_SECONDS:
+            del _cache[key]
+            expired = value
+        else:
+            _cache.move_to_end(key)
+            return value
+    _close_quietly(expired)
+    return None
+
+
+def _cache_put(key: tuple, value: Any) -> None:
+    evicted = []
+    with _cache_lock:
+        if key in _cache:
+            evicted.append(_cache.pop(key)[1])
+        _cache[key] = (time.monotonic(), value)
+        while len(_cache) > _CACHE_MAX_ENTRIES:
+            evicted.append(_cache.popitem(last=False)[1][1])
+    for value in evicted:
+        _close_quietly(value)
+
+
+def clear_googleads_cache() -> None:
+    """Drops every cached client and service.
+
+    Exposed for tests and for hosts that need to force new credentials.
+    """
+    with _cache_lock:
+        values = [value for _, value in _cache.values()]
+        _cache.clear()
+    for value in values:
+        _close_quietly(value)
+
+
+def _get_googleads_client() -> GoogleAdsClient:
+    key = _credential_identity() + ("client", _get_login_customer_id())
+    client = _cache_get(key)
+    if client is None:
+        client = _build_googleads_client()
+        _cache_put(key, client)
+    return client
+
+
 def get_googleads_service(serviceName: str) -> GoogleAdsServiceClient:
-    return _get_googleads_client().get_service(
-        serviceName, interceptors=[MCPHeaderInterceptor()]
+    key = _credential_identity() + (
+        "service",
+        serviceName,
+        _get_login_customer_id(),
     )
+    service = _cache_get(key)
+    if service is None:
+        service = _get_googleads_client().get_service(
+            serviceName, interceptors=[MCPHeaderInterceptor()]
+        )
+        _cache_put(key, service)
+    return service
 
 
 def get_googleads_type(typeName: str):
+    # Deliberately not cached: callers mutate the message they get back.
     return _get_googleads_client().get_type(typeName)
 
 

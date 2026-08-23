@@ -16,7 +16,7 @@
 
 import unittest
 from unittest.mock import patch, mock_open
-from ads_mcp.config import ToolsConfig
+from ads_mcp.config import ALL_CATEGORIES, ToolsConfig
 
 
 class TestToolsConfig(unittest.TestCase):
@@ -34,6 +34,36 @@ class TestToolsConfig(unittest.TestCase):
         self.assertEqual(config.get_namespace_prefix("search"), "search")
 
         self.assertTrue(config.is_tool_enabled("search", "search"))
+
+    def test_absent_namespaces_key_enables_all_default_categories(self):
+        """Tests that a config without a 'namespaces' key enables every category."""
+        config = ToolsConfig({})
+        for category in ALL_CATEGORIES:
+            self.assertTrue(config.is_namespace_enabled(category))
+            self.assertTrue(config.is_tool_enabled(category, "any_tool"))
+        self.assertFalse(config.is_namespace_enabled("unknown_category"))
+        self.assertFalse(config.is_tool_enabled("unknown_category", "any_tool"))
+
+    def test_empty_namespaces_mapping_enables_nothing(self):
+        """Tests that 'namespaces: {}' disables every category."""
+        config = ToolsConfig({"namespaces": {}})
+        for category in ALL_CATEGORIES:
+            self.assertFalse(config.is_namespace_enabled(category))
+            self.assertFalse(config.is_tool_enabled(category, "any_tool"))
+
+    def test_null_namespaces_enables_nothing(self):
+        """Tests that a bare 'namespaces:' key disables every category."""
+        # YAML parses "namespaces:" with no children as None rather than {},
+        # and both spellings must mean "enable nothing", not "enable all".
+        config = ToolsConfig({"namespaces": None})
+        for category in ALL_CATEGORIES:
+            self.assertFalse(config.is_namespace_enabled(category))
+            self.assertFalse(config.is_tool_enabled(category, "any_tool"))
+
+    def test_non_mapping_namespaces_raises_value_error(self):
+        """Tests that a non-mapping 'namespaces' value is rejected."""
+        with self.assertRaises(ValueError):
+            ToolsConfig({"namespaces": ["customers", "search"]})
 
     def test_boolean_namespaces(self):
         """Tests namespaces enabled via simple booleans."""
@@ -106,6 +136,47 @@ class TestToolsConfig(unittest.TestCase):
         self.assertFalse(
             config.is_tool_enabled("search", "unlisted_search_tool")
         )
+
+    def test_enabled_tools_mapping_filters_like_the_list_form(self):
+        """Tests that an 'enabled_tools' mapping acts as a tool filter.
+
+        The documented filter format is a list (of names, or of single-entry
+        mappings), but the natural YAML spelling is a plain mapping; both
+        must behave the same -- in particular, a tool explicitly marked
+        False must be disabled, and unmentioned tools default to disabled.
+        """
+        data = {
+            "namespaces": {
+                "customers": {
+                    "enabled": True,
+                    "enabled_tools": {
+                        "list_accessible_customers": True,
+                        "another_tool": False,
+                    },
+                }
+            }
+        }
+        config = ToolsConfig(data)
+        self.assertTrue(config.is_namespace_enabled("customers"))
+        self.assertTrue(
+            config.is_tool_enabled("customers", "list_accessible_customers")
+        )
+        self.assertFalse(config.is_tool_enabled("customers", "another_tool"))
+        self.assertFalse(config.is_tool_enabled("customers", "unlisted_tool"))
+
+    def test_enabled_tools_invalid_type_raises_value_error(self):
+        """Tests that a non-list, non-mapping enabled_tools is rejected."""
+        data = {
+            "namespaces": {
+                "customers": {
+                    "enabled": True,
+                    "enabled_tools": "list_accessible_customers",
+                }
+            }
+        }
+        config = ToolsConfig(data)
+        with self.assertRaises(ValueError):
+            config.is_tool_enabled("customers", "list_accessible_customers")
 
     @patch("os.path.exists")
     def test_load_missing_file_raises_file_not_found(self, mock_exists):
