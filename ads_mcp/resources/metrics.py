@@ -14,9 +14,12 @@
 
 """Metrics resource."""
 
-import urllib.request
-
 from ads_mcp.coordinator import mcp
+from ads_mcp.resources import fetch_cache
+
+# The docs page is on the order of a megabyte; anything past this cap is a
+# runaway response, not documentation.
+_MAX_RESPONSE_BYTES = 16 * 1024 * 1024
 
 
 @mcp.resource(
@@ -38,9 +41,4 @@ def get_metrics() -> str:
         str: The metrics documentation in HTML format.
     """
     url = "https://developers.google.com/google-ads/api/fields/latest/metrics"
-    req = urllib.request.Request(
-        url,
-        headers={"User-Agent": "Mozilla/5.0"},
-    )
-    with urllib.request.urlopen(req) as response:
-        return response.read().decode("utf-8")
+    return fetch_cache.fetch_text(url, _MAX_RESPONSE_BYTES)

@@ -1,0 +1,16 @@
+# Credentials — must never end up inside the image
+client_secret*.json
+google-ads.yaml
+.env
+application_default_credentials.json
+credentials.json
+
+# Repository metadata and local build/test state
+.git
+tests
+build
+dist
+*.egg-info
+.nox
+.venv
+__pycache__

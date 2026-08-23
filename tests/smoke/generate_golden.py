@@ -16,11 +16,14 @@ import json
 import os
 import sys
 from tests.smoke import smoke_utils
-from google.genai import types
 
+# google-genai is only needed for the optional LLM baselines below; golden
+# tools/resources regeneration must work without it installed.
 try:
+    from google.genai import types
     from tests.smoke import llm_sender
 except ImportError:
+    types = None
     llm_sender = None
 
 

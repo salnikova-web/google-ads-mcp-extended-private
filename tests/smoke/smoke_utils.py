@@ -23,10 +23,14 @@ from typing import Any, Dict, List, Optional
 
 def start_server_process() -> subprocess.Popen:
     """Starts the MCP server as a subprocess."""
-    # Ensure the server runs in stdio mode by clearing OAuth proxy env vars
+    # Ensure the server runs in stdio mode by clearing OAuth proxy env vars.
+    # Also pin the tools config to the bundled default: an ambient
+    # GOOGLE_ADS_MCP_TOOLS_CONFIG would change which tools the server exposes
+    # and make golden generation depend on the developer's machine.
     env = os.environ.copy()
     env.pop("GOOGLE_ADS_MCP_OAUTH_CLIENT_ID", None)
     env.pop("GOOGLE_ADS_MCP_OAUTH_CLIENT_SECRET", None)
+    env.pop("GOOGLE_ADS_MCP_TOOLS_CONFIG", None)
 
     return subprocess.Popen(
         [sys.executable, "-m", "ads_mcp.server"],

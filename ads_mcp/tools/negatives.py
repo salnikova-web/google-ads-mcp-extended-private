@@ -220,9 +220,7 @@ def attach_to_campaigns(
         operation = client.get_type("CampaignSharedSetOperation")
         css = operation.create
         css.campaign = f"customers/{customer_id}/campaigns/{cid}"
-        css.shared_set = (
-            f"customers/{customer_id}/sharedSets/{shared_set_id}"
-        )
+        css.shared_set = f"customers/{customer_id}/sharedSets/{shared_set_id}"
         request.operations.append(operation)
 
     try:
@@ -245,23 +243,35 @@ def attach_to_campaigns(
 @negatives_mcp.tool(annotations=_READ)
 def list_shared_sets(
     customer_id: str,
-) -> List[Dict[str, Any]]:
+    limit: int = 200,
+) -> Dict[str, Any]:
     """Lists shared negative keyword lists with ids and usage counts.
+
+    Returns {"items": [...], "returned": n, "truncated": bool}. When
+    truncated is true the account has more lists than limit, so a name
+    missing from items means "not listed", NOT "does not exist" — raise
+    limit before creating a duplicate list or concluding an id is unusable.
 
     Args:
         customer_id: The client account id (digits only, no hyphens).
+        limit: Max lists returned (default 200).
     """
     customer_id = _clean_customer_id(customer_id)
+    cap = int(limit)
     ga_service = utils.get_googleads_service("GoogleAdsService")
     query = (
         "SELECT shared_set.id, shared_set.name, shared_set.member_count, "
         "shared_set.reference_count, shared_set.status FROM shared_set "
         "WHERE shared_set.type = 'NEGATIVE_KEYWORDS' "
-        "AND shared_set.status = 'ENABLED'"
+        "AND shared_set.status = 'ENABLED' "
+        "ORDER BY shared_set.name "
+        # One row past the cap: reading it back is how truncation is
+        # detected, so the cut is reported instead of silently applied.
+        f"LIMIT {cap + 1}"
     )
     try:
         rows = ga_service.search(customer_id=customer_id, query=query)
-        return [
+        out = [
             {
                 "id": str(row.shared_set.id),
                 "name": row.shared_set.name,
@@ -270,5 +280,12 @@ def list_shared_sets(
             }
             for row in rows
         ]
+        truncated = len(out) > cap
+        items = out[:cap]
+        return {
+            "items": items,
+            "returned": len(items),
+            "truncated": truncated,
+        }
     except GoogleAdsException as ex:
         _raise_tool_error(ex)

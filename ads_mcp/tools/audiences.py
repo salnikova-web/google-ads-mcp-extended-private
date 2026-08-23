@@ -108,7 +108,8 @@ def create(
         "name": name,
         "min_age": min_age,
         "genders": genders,
-        "segments": len(user_list_ids) + len(user_interest_ids)
+        "segments": len(user_list_ids)
+        + len(user_interest_ids)
         + len(custom_audience_ids),
     }
     if confirm:
@@ -158,9 +159,7 @@ def custom_segment_create(
         ca.description = description
     for kw in keywords or []:
         member = client.get_type("CustomAudienceMember")
-        member.member_type = (
-            client.enums.CustomAudienceMemberTypeEnum.KEYWORD
-        )
+        member.member_type = client.enums.CustomAudienceMemberTypeEnum.KEYWORD
         member.keyword = kw
         ca.members.append(member)
     for url in urls or []:
@@ -275,27 +274,43 @@ def user_list_create_visitors(
 @audiences_mcp.tool(annotations=_READ)
 def list_audiences(
     customer_id: str,
-) -> Dict[str, List[Dict[str, Any]]]:
+    limit: int = 100,
+) -> Dict[str, Any]:
     """Lists audiences available in the account: combined Audiences,
     remarketing user lists and custom segments, with ids and sizes.
 
+    Each of the three sections is capped at limit rows independently and
+    the "truncated" map says which of them was cut short. A name missing
+    from a truncated section means "not listed", NOT "does not exist" —
+    raise limit before concluding an audience has to be created.
+
     Args:
         customer_id: The client account id (digits only, no hyphens).
+        limit: Max rows per section (default 100).
     """
     customer_id = _clean_customer_id(customer_id)
+    cap = int(limit)
     ga_service = utils.get_googleads_service("GoogleAdsService")
 
-    out: Dict[str, List[Dict[str, Any]]] = {
+    out: Dict[str, Any] = {
         "audiences": [],
         "user_lists": [],
         "custom_segments": [],
+        "truncated": {
+            "audiences": False,
+            "user_lists": False,
+            "custom_segments": False,
+        },
     }
+    # Each query asks for one row past the cap: reading it back is how
+    # truncation is detected, so the cut is reported instead of silently
+    # applied.
     try:
         for row in ga_service.search(
             customer_id=customer_id,
             query=(
                 "SELECT audience.id, audience.name, audience.description "
-                "FROM audience"
+                f"FROM audience ORDER BY audience.name LIMIT {cap + 1}"
             ),
         ):
             out["audiences"].append(
@@ -306,7 +321,8 @@ def list_audiences(
             query=(
                 "SELECT user_list.id, user_list.name, user_list.type, "
                 "user_list.size_for_search, user_list.size_for_display "
-                "FROM user_list WHERE user_list.membership_status = 'OPEN'"
+                "FROM user_list WHERE user_list.membership_status = 'OPEN' "
+                f"ORDER BY user_list.name LIMIT {cap + 1}"
             ),
         ):
             out["user_lists"].append(
@@ -323,7 +339,9 @@ def list_audiences(
             query=(
                 "SELECT custom_audience.id, custom_audience.name, "
                 "custom_audience.type, custom_audience.status "
-                "FROM custom_audience WHERE custom_audience.status = 'ENABLED'"
+                "FROM custom_audience "
+                "WHERE custom_audience.status = 'ENABLED' "
+                f"ORDER BY custom_audience.name LIMIT {cap + 1}"
             ),
         ):
             out["custom_segments"].append(
@@ -335,6 +353,11 @@ def list_audiences(
             )
     except GoogleAdsException as ex:
         _raise_tool_error(ex)
+
+    for section in ("audiences", "user_lists", "custom_segments"):
+        if len(out[section]) > cap:
+            out[section] = out[section][:cap]
+            out["truncated"][section] = True
     return out
 
 

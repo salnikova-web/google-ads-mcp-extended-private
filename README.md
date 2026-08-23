@@ -14,7 +14,7 @@ management, all with a dry-run safety default — are documented in
 The server uses the
 [Google Ads API](https://developers.google.com/google-ads/api/reference/rpc/latest/overview)
 to provide several
-[Tools](https://modelcontextprotocol.io/docs/concepts/tools) and [Resources](https://modelcontextprotocol.io/docs/concepts/tools) for use with LLMs and AI agents.
+[Tools](https://modelcontextprotocol.io/docs/concepts/tools) and [Resources](https://modelcontextprotocol.io/docs/concepts/resources) for use with LLMs and AI agents.
 
 ### Tools available
 
@@ -50,6 +50,59 @@ namespaces:
     prefix: "metadata"
     enabled_tools:
       - get_resource_metadata: true
+```
+
+#### Opt-in profiles
+
+The default configuration enables all 16 namespaces (98 tools). If you do not
+need the full surface — for reporting-only use, or to reduce the tool schemas
+sent to your LLM on every request — save one of the profiles below to a file
+and point `GOOGLE_ADS_MCP_TOOLS_CONFIG` at it.
+
+Note the three-state semantics of the `namespaces` key: **omitting the key
+entirely keeps the enable-all default**, while a `namespaces:` block that is
+present but empty (no children, or `{}`) enables **nothing**. To restrict the
+server, list exactly the namespaces you want.
+
+Read-only (reporting and metadata, no writes):
+
+```yaml
+namespaces:
+  customers: true
+  search: true
+  metadata: true
+```
+
+Read + core mutate (adds Search campaign/ad group/keyword/ad management):
+
+```yaml
+namespaces:
+  customers: true
+  search: true
+  metadata: true
+  mutate: true
+```
+
+Full (all 16 namespaces — identical to the bundled default):
+
+```yaml
+namespaces:
+  customers: true
+  search: true
+  metadata: true
+  mutate: true
+  demandgen: true
+  pmax: true
+  extensions: true
+  targeting: true
+  shopping: true
+  video: true
+  display: true
+  tracking: true
+  audiences: true
+  optimize: true
+  negatives: true
+  experiments: true
 ```
 
 
@@ -168,9 +221,11 @@ Credentials saved to file: [PATH_TO_CREDENTIALS_JSON]
 [Follow the instructions](https://developers.google.com/google-ads/api/docs/client-libs/python/)
 to setup and configure the Google Ads API Python client library
 
-If you have already done this and have a working `google-ads.yaml` , you can reuse this file!
-
-In the utils.py file, change get_googleads_client() to use the load_from_storage() method.
+Note that this server does not read `google-ads.yaml` directly: it
+authenticates through Application Default Credentials and reads the developer
+token and login customer id from environment variables (see the MCP client
+configuration below). If you already set up the client library, you can reuse
+the same OAuth client and values in those environment variables.
 
 ### Configure your MCP client
 
@@ -317,16 +372,46 @@ You can use Cloud Build to build and push the image to Artifact Registry without
     ```
     Replace `YOUR_PROJECT_ID` with your Google Cloud project ID.
 
-### Step 2: Deploy to Google Cloud Run
+### Step 2: Store secrets in Secret Manager
 
-Make sure to set the required environment variables:
+The developer token and the OAuth client secret are secrets. Do not pass them
+via `--set-env-vars`: values passed that way end up in your shell history and
+are visible in the Cloud Run revision configuration to anyone with the
+`run.viewer` role. Store them in
+[Secret Manager](https://cloud.google.com/secret-manager) and mount them with
+`--set-secrets` instead.
+
+1.  Create the secrets:
+    ```shell
+    printf '%s' 'YOUR_DEVELOPER_TOKEN' | \
+      gcloud secrets create google-ads-developer-token --data-file=-
+    printf '%s' 'YOUR_CLIENT_SECRET' | \
+      gcloud secrets create google-ads-mcp-oauth-client-secret --data-file=-
+    ```
+2.  Grant the Cloud Run runtime service account access to them. By default
+    this is the Compute Engine default service account
+    (`PROJECT_NUMBER-compute@developer.gserviceaccount.com`); if you deploy
+    with `--service-account`, grant that account instead.
+    ```shell
+    gcloud secrets add-iam-policy-binding google-ads-developer-token \
+      --member="serviceAccount:RUNTIME_SERVICE_ACCOUNT" \
+      --role="roles/secretmanager.secretAccessor"
+    gcloud secrets add-iam-policy-binding google-ads-mcp-oauth-client-secret \
+      --member="serviceAccount:RUNTIME_SERVICE_ACCOUNT" \
+      --role="roles/secretmanager.secretAccessor"
+    ```
+
+Without the `roles/secretmanager.secretAccessor` binding, the deployment in
+the next step fails to start.
+
+### Step 3: Deploy to Google Cloud Run
+
+Environment variables used by the server:
 
 - `GOOGLE_PROJECT_ID`: Your Google Cloud project ID.
-- `GOOGLE_ADS_DEVELOPER_TOKEN`: The developer token you want the MCP server to use (see above).
 - `GOOGLE_ADS_MCP_OAUTH_CLIENT_ID`: The OAuth Client ID you want the MCP server to use.
-- `GOOGLE_ADS_MCP_OAUTH_CLIENT_SECRET`: The OAuth Client secret you want the MCP server to use.
-- `GOOGLE_ADS_MCP_BASE_URL`: The base URL where your MCP server is accessible: this will be automatically assigned by Google Cloud Run after your first deployment. You can update the environment variables after deployment. 
-- `FASTMCP_HOST`: Set this to `0.0.0.0` to allow FastMCP to accept connections from all IP addresses.
+- `GOOGLE_ADS_MCP_BASE_URL`: The base URL where your MCP server is accessible: this will be automatically assigned by Google Cloud Run after your first deployment. You can update the environment variables after deployment.
+- `GOOGLE_ADS_DEVELOPER_TOKEN` and `GOOGLE_ADS_MCP_OAUTH_CLIENT_SECRET`: supplied from Secret Manager via `--set-secrets` (see Step 2).
 
 ```shell
 gcloud run deploy google-ads-mcp \
@@ -334,10 +419,19 @@ gcloud run deploy google-ads-mcp \
   --platform managed \
   --region us-central1 \
   --allow-unauthenticated \
-  --set-env-vars="GOOGLE_PROJECT_ID=YOUR_PROJECT_ID,GOOGLE_ADS_DEVELOPER_TOKEN=YOUR_DEVELOPER_TOKEN,GOOGLE_ADS_MCP_OAUTH_CLIENT_ID=YOUR_CLIENT_ID,GOOGLE_ADS_MCP_OAUTH_CLIENT_SECRET=YOUR_CLIENT_SECRET,GOOGLE_ADS_MCP_BASE_URL=YOUR_BASE_URL,FASTMCP_HOST=0.0.0.0"
+  --set-env-vars="GOOGLE_PROJECT_ID=YOUR_PROJECT_ID,GOOGLE_ADS_MCP_OAUTH_CLIENT_ID=YOUR_CLIENT_ID,GOOGLE_ADS_MCP_BASE_URL=YOUR_BASE_URL" \
+  --set-secrets="GOOGLE_ADS_DEVELOPER_TOKEN=google-ads-developer-token:latest,GOOGLE_ADS_MCP_OAUTH_CLIENT_SECRET=google-ads-mcp-oauth-client-secret:latest"
 ```
 
-### Step 3: Configure MCP Client
+Note on `--allow-unauthenticated`: it is required — the OAuth proxy flow must
+be reachable by unauthenticated clients so they can complete the sign-in.
+This means the OAuth flow is the **only** access control on the deployed
+service: anyone who can reach the URL can attempt to authenticate, and any
+Google account that completes the flow can call the tools (spending your
+developer token quota). Treat the service URL accordingly, and consider
+restricting ingress at the network level if your setup allows it.
+
+### Step 4: Configure MCP Client
 
 Once deployed, update your MCP client configuration to use the Cloud Run URL.
 

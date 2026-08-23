@@ -21,6 +21,7 @@ Safety model: identical to ads_mcp.tools.mutate — every write tool accepts
 ``confirm`` (default ``False`` = validate_only dry-run preview).
 """
 
+import re
 from typing import Any, Dict, List, Optional
 
 from fastmcp import FastMCP
@@ -133,12 +134,8 @@ def set_locations(
     for loc_id in location_ids:
         operation = client.get_type("CampaignCriterionOperation")
         criterion = operation.create
-        criterion.campaign = (
-            f"customers/{customer_id}/campaigns/{campaign_id}"
-        )
-        criterion.location.geo_target_constant = (
-            f"geoTargetConstants/{loc_id}"
-        )
+        criterion.campaign = f"customers/{customer_id}/campaigns/{campaign_id}"
+        criterion.location.geo_target_constant = f"geoTargetConstants/{loc_id}"
         if negative:
             criterion.negative = True
         request.operations.append(operation)
@@ -162,6 +159,28 @@ def set_locations(
     return _preview_or_done(confirm, "targeting_set_locations", details)
 
 
+# Shape of language_constant.code: a two- or three-letter language, with an
+# optional region suffix ("en", "de", "zh_CN"). The codes go straight into a
+# GAQL string literal, so anything outside this shape is rejected instead of
+# escaped — no legitimate code needs a quote or a backslash.
+_LANGUAGE_CODE = re.compile(r"\A[A-Za-z]{2,3}(?:[-_][A-Za-z0-9]{2,8})?\Z")
+
+
+def _language_code(code: str) -> str:
+    """Validates a language code by shape and returns its canonical form."""
+    text = str(code).strip()
+    if not _LANGUAGE_CODE.match(text):
+        raise ToolError(
+            f"Invalid language code: {code!r} "
+            "(expected e.g. 'en', 'de', 'zh_CN')"
+        )
+    for separator in ("_", "-"):
+        if separator in text:
+            language, region = text.split(separator, 1)
+            return f"{language.lower()}{separator}{region.upper()}"
+    return text.lower()
+
+
 @targeting_mcp.tool(annotations=_WRITE)
 def set_languages(
     customer_id: str,
@@ -171,19 +190,20 @@ def set_languages(
 ) -> Dict[str, Any]:
     """Adds language targeting to a campaign.
 
-    Looks up language ids by two-letter codes automatically. SAFETY:
-    dry-run by default (validate_only); re-run with confirm=true.
+    Looks up language ids by their codes automatically. SAFETY: dry-run by
+    default (validate_only); re-run with confirm=true.
 
     Args:
         customer_id: The client account id (digits only, no hyphens).
         campaign_id: The numeric id of the campaign.
-        language_codes: Two-letter codes, e.g. ["en", "de", "uk"].
+        language_codes: Codes as Google Ads spells them, e.g. ["en", "de",
+            "uk", "zh_CN"].
         confirm: False = dry-run preview (default), True = apply.
     """
     customer_id = _clean_customer_id(customer_id)
     if not language_codes:
         raise ToolError("language_codes list is empty")
-    codes = [c.lower() for c in language_codes]
+    codes = [_language_code(c) for c in language_codes]
 
     ga_service = utils.get_googleads_service("GoogleAdsService")
     codes_str = ", ".join(f"'{c}'" for c in codes)
@@ -197,7 +217,9 @@ def set_languages(
     except GoogleAdsException as ex:
         _raise_tool_error(ex)
 
-    found = {row.language_constant.code: row.language_constant.id for row in rows}
+    found = {
+        row.language_constant.code: row.language_constant.id for row in rows
+    }
     missing = [c for c in codes if c not in found]
     if missing:
         raise ToolError(f"Unknown language codes: {missing}")
@@ -212,9 +234,7 @@ def set_languages(
     for code in codes:
         operation = client.get_type("CampaignCriterionOperation")
         criterion = operation.create
-        criterion.campaign = (
-            f"customers/{customer_id}/campaigns/{campaign_id}"
-        )
+        criterion.campaign = f"customers/{customer_id}/campaigns/{campaign_id}"
         criterion.language.language_constant = (
             f"languageConstants/{found[code]}"
         )
@@ -280,17 +300,13 @@ def set_ad_schedule(
     for w in schedule:
         operation = client.get_type("CampaignCriterionOperation")
         criterion = operation.create
-        criterion.campaign = (
-            f"customers/{customer_id}/campaigns/{campaign_id}"
-        )
+        criterion.campaign = f"customers/{customer_id}/campaigns/{campaign_id}"
         criterion.ad_schedule.day_of_week = client.enums.DayOfWeekEnum[
             str(w["day"]).upper()
         ]
         criterion.ad_schedule.start_hour = int(w["start_hour"])
         criterion.ad_schedule.end_hour = int(w["end_hour"])
-        criterion.ad_schedule.start_minute = (
-            client.enums.MinuteOfHourEnum.ZERO
-        )
+        criterion.ad_schedule.start_minute = client.enums.MinuteOfHourEnum.ZERO
         criterion.ad_schedule.end_minute = client.enums.MinuteOfHourEnum.ZERO
         request.operations.append(operation)
 
@@ -372,16 +388,23 @@ def remove_criterion(
 def list_criteria(
     customer_id: str,
     campaign_id: str,
-) -> List[Dict[str, Any]]:
+    limit: int = 500,
+) -> Dict[str, Any]:
     """Lists campaign targeting criteria: locations, languages, schedule.
 
-    Returns criterion ids needed for remove_criterion.
+    Returns the criterion ids needed for remove_criterion, as
+    {"items": [...], "returned": n, "truncated": bool}. When truncated is
+    true the campaign has more criteria than limit, so an id missing from
+    items means "not listed", NOT "does not exist" — raise limit before
+    concluding a criterion is already gone.
 
     Args:
         customer_id: The client account id (digits only, no hyphens).
         campaign_id: The numeric id of the campaign.
+        limit: Max criteria returned (default 500).
     """
     customer_id = _clean_customer_id(customer_id)
+    cap = int(limit)
     ga_service = utils.get_googleads_service("GoogleAdsService")
     query = (
         "SELECT campaign_criterion.criterion_id, campaign_criterion.type, "
@@ -394,7 +417,11 @@ def list_criteria(
         "FROM campaign_criterion "
         f"WHERE campaign.id = {int(campaign_id)} "
         "AND campaign_criterion.type IN ('LOCATION', 'LANGUAGE', "
-        "'AD_SCHEDULE')"
+        "'AD_SCHEDULE') "
+        "ORDER BY campaign_criterion.criterion_id "
+        # One row past the cap: reading it back is how truncation is
+        # detected, so the cut is reported instead of silently applied.
+        f"LIMIT {cap + 1}"
     )
     try:
         rows = ga_service.search(customer_id=customer_id, query=query)
@@ -417,7 +444,13 @@ def list_criteria(
                     f"{cc.ad_schedule.end_hour}:00"
                 )
             out.append(item)
-        return out
+        truncated = len(out) > cap
+        items = out[:cap]
+        return {
+            "items": items,
+            "returned": len(items),
+            "truncated": truncated,
+        }
     except GoogleAdsException as ex:
         _raise_tool_error(ex)
 
@@ -762,9 +795,7 @@ def set_locations_ad_group(
         operation = client.get_type("AdGroupCriterionOperation")
         criterion = operation.create
         criterion.ad_group = f"customers/{customer_id}/adGroups/{ad_group_id}"
-        criterion.location.geo_target_constant = (
-            f"geoTargetConstants/{loc_id}"
-        )
+        criterion.location.geo_target_constant = f"geoTargetConstants/{loc_id}"
         if negative:
             criterion.negative = True
         request.operations.append(operation)
@@ -784,7 +815,9 @@ def set_locations_ad_group(
         details["created_resources"] = [
             r.resource_name for r in response.results
         ]
-    return _preview_or_done(confirm, "targeting_set_locations_ad_group", details)
+    return _preview_or_done(
+        confirm, "targeting_set_locations_ad_group", details
+    )
 
 
 @targeting_mcp.tool(annotations=_WRITE)
@@ -829,9 +862,7 @@ def set_ad_group_target_restrictions(
 
     def _restriction(dim: str, bid_only: bool):
         r = client.get_type("TargetRestriction")
-        r.targeting_dimension = client.enums.TargetingDimensionEnum[
-            dim.upper()
-        ]
+        r.targeting_dimension = client.enums.TargetingDimensionEnum[dim.upper()]
         r.bid_only = bid_only
         return r
 

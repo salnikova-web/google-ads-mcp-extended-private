@@ -394,7 +394,9 @@ def ad_group_set_item_listing(
         "exclude_others": exclude_others,
         "nodes": len(ops),
     }
-    return _preview_or_done(confirm, "shopping_ad_group_set_item_listing", details)
+    return _preview_or_done(
+        confirm, "shopping_ad_group_set_item_listing", details
+    )
 
 
 @shopping_mcp.tool(annotations=_WRITE)

@@ -20,8 +20,11 @@ of the server.
 """
 
 import os
+from typing import Sequence
 from fastmcp import FastMCP
 from fastmcp.server.auth.providers.google import GoogleProvider
+from fastmcp.server.providers import FastMCPProvider
+from fastmcp.server.transforms import Transform
 
 _CLIENT_ID = os.environ.get("GOOGLE_ADS_MCP_OAUTH_CLIENT_ID")
 _CLIENT_SECRET = os.environ.get("GOOGLE_ADS_MCP_OAUTH_CLIENT_SECRET")
@@ -42,6 +45,34 @@ if _CLIENT_ID and _CLIENT_SECRET:
     mcp = FastMCP("Google Ads Server", auth=auth)
 else:
     mcp = FastMCP("Google Ads Server")
+
+
+class _EnabledToolsFilter(Transform):
+    """Hides the tools that the configuration disables for one category.
+
+    The sub-servers are module-level singletons (``importlib`` caches the
+    tool modules), so removing tools from them would leak one mount's
+    configuration into every later mount in the same process. Filtering in
+    the provider chain instead leaves the shared objects untouched: the
+    filter applies to listing and to lookup, so a disabled tool can neither
+    be seen nor called through the parent server.
+    """
+
+    def __init__(self, config, category: str):
+        self._config = config
+        self._category = category
+
+    def _is_enabled(self, tool_name: str) -> bool:
+        return self._config.is_tool_enabled(self._category, tool_name)
+
+    async def list_tools(self, tools: Sequence) -> Sequence:
+        return [tool for tool in tools if self._is_enabled(tool.name)]
+
+    async def get_tool(self, name: str, call_next, *, version=None):
+        tool = await call_next(name, version=version)
+        if tool is None or not self._is_enabled(tool.name):
+            return None
+        return tool
 
 
 def initialize_and_mount_tools(parent_mcp: FastMCP) -> None:
@@ -72,21 +103,18 @@ def initialize_and_mount_tools(parent_mcp: FastMCP) -> None:
         if not config.is_namespace_enabled(category):
             continue
 
-        # Filter disabled tools inside the sub-server before mounting
-        tool_names = []
-        for key, val in sub_mcp.local_provider._components.items():
-            if key.startswith("tool:"):
-                tool_names.append(val.name)
-
-        for name in tool_names:
-            if not config.is_tool_enabled(category, name):
-                sub_mcp.local_provider.remove_tool(name)
-
         # Determine prefix/namespace
         namespace_prefix = config.get_namespace_prefix(category)
 
-        # Mount the sub-server
-        parent_mcp.mount(sub_mcp, namespace=namespace_prefix or None)
+        # Mount through a provider that filters disabled tools instead of
+        # removing them from the shared sub-server (see _EnabledToolsFilter).
+        # This mirrors what FastMCP.mount() does internally, with the filter
+        # inserted before the namespace is applied so the configuration can
+        # keep matching on the original tool names.
+        provider = FastMCPProvider(sub_mcp).wrap_transform(
+            _EnabledToolsFilter(config, category)
+        )
+        parent_mcp.add_provider(provider, namespace=namespace_prefix or "")
 
 
 # Automatically initialize and mount tools upon import

@@ -56,13 +56,15 @@ def search(
     if orderings:
         query_parts.append(f" ORDER BY {','.join(orderings)}")
 
-    if limit:
-        query_parts.append(f" LIMIT {limit}")
+    if limit is not None:
+        query_parts.append(f" LIMIT {int(limit)}")
 
     query_parts.append(" PARAMETERS omit_unselected_resource_names=true")
 
     query = "".join(query_parts)
-    utils.logger.info(f"ads_mcp.search query {query}")
+    # DEBUG, not INFO: conditions are caller-supplied and may carry data that
+    # does not belong in default server output.
+    utils.logger.debug(f"ads_mcp.search query {query}")
 
     try:
         query_result = ga_service.search_stream(

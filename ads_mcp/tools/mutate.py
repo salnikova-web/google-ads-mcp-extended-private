@@ -56,6 +56,8 @@ _ALLOWED_BIDDING = [
     "MANUAL_CPC",
 ]
 
+_ALLOWED_CAMPAIGN_STATUSES = ["ENABLED", "PAUSED", "REMOVED"]
+
 
 def _raise_tool_error(ex: GoogleAdsException) -> None:
     error_msgs = []
@@ -78,22 +80,52 @@ def _to_micros(amount: float) -> int:
 
 
 def _clean_customer_id(customer_id: str) -> str:
-    return str(customer_id).replace("-", "").strip()
+    """Normalises a customer id to digits, rejecting anything else.
+
+    Customer ids are spliced into resource names and query conditions, so a
+    value that is not purely numeric must never get through.
+    """
+    return utils.gaql_id(str(customer_id).replace("-", "").strip())
 
 
-def _preview_or_done(confirm: bool, action: str, details: Dict[str, Any]) -> Dict[str, Any]:
+def _preview_or_done(
+    confirm: bool,
+    action: str,
+    details: Dict[str, Any],
+    validated: bool = True,
+) -> Dict[str, Any]:
+    """Builds the applied/dry-run result envelope.
+
+    Args:
+        confirm: True when the operation was actually applied.
+        action: Tool-specific action name reported back to the caller.
+        details: Extra fields to merge into the result.
+        validated: Whether the dry-run really sent a validate_only request to
+            Google Ads. Pass False from tools that skip the API entirely when
+            confirm is false, so the preview does not claim a validation that
+            never happened. ``details`` is merged first, so this flag always
+            wins over a stray key of the same name.
+    """
     if confirm:
-        return {"applied": True, "action": action, **details}
-    return {
-        "applied": False,
-        "validated": True,
-        "action": action,
-        "note": (
+        return {**details, "applied": True, "action": action}
+    if validated:
+        note = (
             "DRY-RUN: the operation was validated by Google Ads "
             "(validate_only=true) but NOT applied. Re-run the tool with "
             "confirm=true to apply it."
-        ),
+        )
+    else:
+        note = (
+            "DRY-RUN: this preview was computed locally. Nothing was sent to "
+            "Google Ads, so nothing was validated and the operation may still "
+            "fail when applied. Re-run the tool with confirm=true to apply it."
+        )
+    return {
         **details,
+        "applied": False,
+        "validated": validated,
+        "action": action,
+        "note": note,
     }
 
 
@@ -153,9 +185,7 @@ def campaign_create(
     status = status.upper()
 
     if channel_type not in _ALLOWED_CHANNEL_TYPES:
-        raise ToolError(
-            f"channel_type must be one of {_ALLOWED_CHANNEL_TYPES}"
-        )
+        raise ToolError(f"channel_type must be one of {_ALLOWED_CHANNEL_TYPES}")
     if bidding_strategy not in _ALLOWED_BIDDING:
         raise ToolError(f"bidding_strategy must be one of {_ALLOWED_BIDDING}")
     if status not in ("PAUSED", "ENABLED"):
@@ -260,7 +290,9 @@ def campaign_create(
     return _preview_or_done(confirm, "campaign_create", details)
 
 
-@mutate_mcp.tool(annotations=_WRITE_ANNOTATIONS)
+@mutate_mcp.tool(
+    annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True)
+)
 def campaign_update_status(
     customer_id: str,
     campaign_id: str,
@@ -346,7 +378,9 @@ def campaign_set_target_roas(
     campaign.maximize_conversion_value.target_roas = float(target_roas)
     client.copy_from(
         operation.update_mask,
-        field_mask_pb2.FieldMask(paths=["maximize_conversion_value.target_roas"]),
+        field_mask_pb2.FieldMask(
+            paths=["maximize_conversion_value.target_roas"]
+        ),
     )
     request = client.get_type("MutateCampaignsRequest")
     request.customer_id = customer_id
@@ -467,7 +501,9 @@ def campaign_update_settings(
         campaign.network_settings.target_search_network = target_search_network
         paths.append("network_settings.target_search_network")
     if target_content_network is not None:
-        campaign.network_settings.target_content_network = target_content_network
+        campaign.network_settings.target_content_network = (
+            target_content_network
+        )
         paths.append("network_settings.target_content_network")
     if positive_geo_target_type is not None:
         geo = positive_geo_target_type.upper()
@@ -482,8 +518,16 @@ def campaign_update_settings(
     if enable_ai_max is not None:
         campaign.ai_max_setting.enable_ai_max = enable_ai_max
         paths.append("ai_max_setting.enable_ai_max")
-    if any(x is not None for x in (text_customization, final_url_expansion,
-            image_enhancement, image_extraction, video_enhancement)):
+    if any(
+        x is not None
+        for x in (
+            text_customization,
+            final_url_expansion,
+            image_enhancement,
+            image_extraction,
+            video_enhancement,
+        )
+    ):
         ga_service = utils.get_googleads_service("GoogleAdsService")
         rows = ga_service.search(
             customer_id=customer_id,
@@ -500,15 +544,19 @@ def campaign_update_settings(
                 )
         t_enum = client.enums.AssetAutomationTypeEnum
         s_enum = client.enums.AssetAutomationStatusEnum
+
         def _set(auto_type, flag):
             current[int(auto_type)] = int(
                 s_enum.OPTED_IN if flag else s_enum.OPTED_OUT
             )
+
         if text_customization is not None:
             _set(t_enum.TEXT_ASSET_AUTOMATION, text_customization)
         if final_url_expansion is not None:
-            _set(t_enum.FINAL_URL_EXPANSION_TEXT_ASSET_AUTOMATION,
-                 final_url_expansion)
+            _set(
+                t_enum.FINAL_URL_EXPANSION_TEXT_ASSET_AUTOMATION,
+                final_url_expansion,
+            )
         if image_enhancement is not None:
             _set(t_enum.GENERATE_IMAGE_ENHANCEMENT, image_enhancement)
         if image_extraction is not None:
@@ -518,9 +566,7 @@ def campaign_update_settings(
         setting_cls = type(campaign).AssetAutomationSetting
         for t, s in sorted(current.items()):
             campaign.asset_automation_settings.append(
-                setting_cls(
-                    asset_automation_type=t, asset_automation_status=s
-                )
+                setting_cls(asset_automation_type=t, asset_automation_status=s)
             )
         paths.append("asset_automation_settings")
     if not paths:
@@ -653,9 +699,7 @@ def campaign_budget_update(
         f"FROM campaign WHERE campaign.id = {int(campaign_id)}"
     )
     try:
-        rows = list(
-            ga_service.search(customer_id=customer_id, query=query)
-        )
+        rows = list(ga_service.search(customer_id=customer_id, query=query))
     except GoogleAdsException as ex:
         _raise_tool_error(ex)
 
@@ -768,7 +812,9 @@ def ad_group_create(
     return _preview_or_done(confirm, "ad_group_create", details)
 
 
-@mutate_mcp.tool(annotations=_WRITE_ANNOTATIONS)
+@mutate_mcp.tool(
+    annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True)
+)
 def ad_group_update(
     customer_id: str,
     ad_group_id: str,
@@ -786,8 +832,8 @@ def ad_group_update(
         customer_id: The client account id (digits only, no hyphens).
         ad_group_id: The numeric id of the ad group.
         status: Optional new status: ENABLED, PAUSED or REMOVED.
-        cpc_bid: Optional new max CPC bid in account currency.
-        new_name: Optional new name.
+        cpc_bid: Optional new max CPC bid in account currency (positive).
+        new_name: Optional new name (must not be blank).
         confirm: False = dry-run preview (default), True = apply changes.
     """
     customer_id = _clean_customer_id(customer_id)
@@ -795,15 +841,19 @@ def ad_group_update(
         raise ToolError(
             "Nothing to update: pass at least one of status, cpc_bid, new_name"
         )
+    if cpc_bid is not None and cpc_bid <= 0:
+        raise ToolError("cpc_bid must be positive")
+    if new_name is not None:
+        new_name = new_name.strip()
+        if not new_name:
+            raise ToolError("new_name must be a non-empty string")
 
     client = utils.get_googleads_client()
     ad_group_service = utils.get_googleads_service("AdGroupService")
 
     operation = client.get_type("AdGroupOperation")
     if status is not None and status.upper() == "REMOVED":
-        operation.remove = (
-            f"customers/{customer_id}/adGroups/{ad_group_id}"
-        )
+        operation.remove = f"customers/{customer_id}/adGroups/{ad_group_id}"
         request = client.get_type("MutateAdGroupsRequest")
         request.customer_id = customer_id
         request.operations.append(operation)
@@ -818,27 +868,28 @@ def ad_group_update(
             "new_status": "REMOVED",
         }
         if confirm:
-            details_removed["removed_resource"] = (
-                response.results[0].resource_name
-            )
+            details_removed["removed_resource"] = response.results[
+                0
+            ].resource_name
         return _preview_or_done(confirm, "ad_group_update", details_removed)
     ad_group = operation.update
-    ad_group.resource_name = (
-        f"customers/{customer_id}/adGroups/{ad_group_id}"
-    )
+    ad_group.resource_name = f"customers/{customer_id}/adGroups/{ad_group_id}"
+    # Each path is appended inside its own branch: a field the caller did
+    # not pass must never reach the mask, or the update would clear it.
+    paths = []
     if status is not None:
         status = status.upper()
         if status not in ("ENABLED", "PAUSED"):
             raise ToolError("status must be ENABLED, PAUSED or REMOVED")
         ad_group.status = client.enums.AdGroupStatusEnum[status]
+        paths.append("status")
     if cpc_bid is not None:
         ad_group.cpc_bid_micros = _to_micros(cpc_bid)
+        paths.append("cpc_bid_micros")
     if new_name is not None:
         ad_group.name = new_name
-    client.copy_from(
-        operation.update_mask,
-        protobuf_helpers.field_mask(None, ad_group._pb),
-    )
+        paths.append("name")
+    operation.update_mask.paths.extend(paths)
 
     request = client.get_type("MutateAdGroupsRequest")
     request.customer_id = customer_id
@@ -937,16 +988,24 @@ def keywords_add(
     match_type: str = "BROAD",
     negative: bool = False,
     cpc_bid: Optional[float] = None,
-    auto_exempt: bool = True,
+    auto_exempt: bool = False,
     confirm: bool = False,
 ) -> Dict[str, Any]:
     """Adds keywords (or negative keywords) to an ad group.
 
     With confirm=true the request runs in partial-failure mode: valid
-    keywords are created even if some fail. Keywords flagged by an
-    EXEMPTIBLE policy violation are automatically retried with a policy
-    exemption when auto_exempt=true (standard practice for false
-    positives). Non-exemptible failures are returned in "policy_failed".
+    keywords are created even if some fail. Keywords rejected for a policy
+    violation are returned in "policy_failed", each with an "exemptible"
+    flag. Re-sending an exemptible one with a policy exemption
+    (auto_exempt=true) asserts on the account owner's behalf that the
+    flagged violation is a false positive, so leave auto_exempt off unless
+    the specific violations have been reviewed and judged wrong.
+
+    DRY-RUN vs APPLY: the dry-run validates all keywords atomically
+    (partial_failure=false, because the API rejects partial_failure
+    together with validate_only), so a single invalid keyword fails the
+    whole preview. The apply uses partial_failure=true, so per-keyword
+    outcomes can differ from what the preview suggested.
 
     SAFETY: by default runs in DRY-RUN mode (validate_only). Re-run with
     confirm=true to apply.
@@ -961,6 +1020,9 @@ def keywords_add(
         negative: True to add as ad-group-level negative keywords.
         cpc_bid: Optional max CPC bid in account currency (ignored for
             negative keywords).
+        auto_exempt: False (default) = policy-blocked keywords are only
+            reported. True = re-send the exemptible ones with a policy
+            exemption, which claims the violations are false positives.
         confirm: False = dry-run preview (default), True = apply changes.
     """
     customer_id = _clean_customer_id(customer_id)
@@ -977,9 +1039,7 @@ def keywords_add(
     for text in keywords:
         operation = client.get_type("AdGroupCriterionOperation")
         criterion = operation.create
-        criterion.ad_group = (
-            f"customers/{customer_id}/adGroups/{ad_group_id}"
-        )
+        criterion.ad_group = f"customers/{customer_id}/adGroups/{ad_group_id}"
         criterion.keyword.text = text
         criterion.keyword.match_type = client.enums.KeywordMatchTypeEnum[
             match_type
@@ -1032,7 +1092,7 @@ def keywords_add(
 
     created: List[str] = []
     exempted: List[str] = []
-    policy_failed: List[Dict[str, str]] = []
+    policy_failed: List[Dict[str, Any]] = []
 
     if not confirm:
         _send(operations, False)  # validate_only, atomic
@@ -1050,7 +1110,11 @@ def keywords_add(
                 retry_texts.append(keywords[idx])
             else:
                 policy_failed.append(
-                    {"keyword": keywords[idx], "reason": msg}
+                    {
+                        "keyword": keywords[idx],
+                        "reason": msg,
+                        "exemptible": key is not None,
+                    }
                 )
         if retry_ops:
             response2 = _send(retry_ops, True)
@@ -1058,7 +1122,11 @@ def keywords_add(
             for i, r in enumerate(response2.results):
                 if i in fails2:
                     policy_failed.append(
-                        {"keyword": retry_texts[i], "reason": fails2[i][0]}
+                        {
+                            "keyword": retry_texts[i],
+                            "reason": fails2[i][0],
+                            "exemptible": fails2[i][1] is not None,
+                        }
                     )
                 elif r.resource_name:
                     created.append(r.resource_name)
@@ -1078,10 +1146,19 @@ def keywords_add(
         details["policy_failed"] = policy_failed
     else:
         details["keywords"] = keywords
+        if auto_exempt:
+            details["auto_exempt_note"] = (
+                "auto_exempt=true: on apply, keywords rejected for an "
+                "exemptible policy violation will be re-sent with a policy "
+                "exemption claiming the violation is a false positive. The "
+                "dry-run cannot show which keywords that would affect."
+            )
     return _preview_or_done(confirm, "keywords_add", details)
 
 
-@mutate_mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True))
+@mutate_mcp.tool(
+    annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True)
+)
 def keywords_remove(
     customer_id: str,
     ad_group_id: str,
@@ -1187,9 +1264,7 @@ def ad_create_rsa(
 
     operation = client.get_type("AdGroupAdOperation")
     ad_group_ad = operation.create
-    ad_group_ad.ad_group = (
-        f"customers/{customer_id}/adGroups/{ad_group_id}"
-    )
+    ad_group_ad.ad_group = f"customers/{customer_id}/adGroups/{ad_group_id}"
     ad_group_ad.status = client.enums.AdGroupAdStatusEnum[status]
     ad = ad_group_ad.ad
     ad.final_urls.append(final_url)
@@ -1232,7 +1307,9 @@ def ad_create_rsa(
     return _preview_or_done(confirm, "ad_create_rsa", details)
 
 
-@mutate_mcp.tool(annotations=_WRITE_ANNOTATIONS)
+@mutate_mcp.tool(
+    annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True)
+)
 def ad_update_status(
     customer_id: str,
     ad_group_id: str,
@@ -1261,9 +1338,7 @@ def ad_update_status(
     ad_service = utils.get_googleads_service("AdGroupAdService")
 
     operation = client.get_type("AdGroupAdOperation")
-    resource_name = (
-        f"customers/{customer_id}/adGroupAds/{ad_group_id}~{ad_id}"
-    )
+    resource_name = f"customers/{customer_id}/adGroupAds/{ad_group_id}~{ad_id}"
     if status == "REMOVED":
         operation.remove = resource_name
     else:
@@ -1309,7 +1384,7 @@ def list_campaigns(
 
     Args:
         customer_id: The client account id (digits only, no hyphens).
-        status: Optional filter: ENABLED or PAUSED.
+        status: Optional filter: ENABLED, PAUSED or REMOVED.
         include_removed: Include REMOVED campaigns (default False).
         limit: Max rows (default 100).
     """
@@ -1318,7 +1393,12 @@ def list_campaigns(
 
     conditions = []
     if status:
-        conditions.append(f"campaign.status = '{status.upper()}'")
+        status = status.upper()
+        if status not in _ALLOWED_CAMPAIGN_STATUSES:
+            raise ToolError(
+                f"status must be one of {_ALLOWED_CAMPAIGN_STATUSES}"
+            )
+        conditions.append(f"campaign.status = '{status}'")
     elif not include_removed:
         conditions.append("campaign.status != 'REMOVED'")
     where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
@@ -1358,6 +1438,9 @@ def campaign_set_conversion_goals(
     "Campaign-specific: <category>" setting. biddable_categories: e.g.
     ["PURCHASE"], ["PURCHASE","ADD_TO_CART"].
 
+    The dry-run reads the current goals too, so "changed" already lists the
+    categories the apply would switch on and off.
+
     SAFETY: dry-run by default (validate_only); re-run with confirm=true.
     """
     from google.protobuf import field_mask_pb2
@@ -1392,12 +1475,10 @@ def campaign_set_conversion_goals(
     except GoogleAdsException as ex:
         _raise_tool_error(ex)
 
-    changed = {"biddable_on": [], "biddable_off": []}
-    if confirm:
-        ga_service = utils.get_googleads_service("GoogleAdsService")
-        ccg_service = utils.get_googleads_service(
-            "CampaignConversionGoalService"
-        )
+    # 2) flip the category goals. The current goals are read in both
+    # branches so the dry-run reports the same diff the apply performs.
+    ga_service = utils.get_googleads_service("GoogleAdsService")
+    try:
         rows = list(
             ga_service.search(
                 customer_id=customer_id,
@@ -1411,29 +1492,38 @@ def campaign_set_conversion_goals(
                 ),
             )
         )
-        ccg_req = client.get_type("MutateCampaignConversionGoalsRequest")
-        ccg_req.customer_id = customer_id
-        for row in rows:
-            g = row.campaign_conversion_goal
-            cat = g.category.name
-            want = cat in wanted
-            if bool(g.biddable) == want:
-                continue
-            o = client.get_type("CampaignConversionGoalOperation")
-            gg = o.update
-            gg.resource_name = g.resource_name
-            gg.biddable = want
-            client.copy_from(
-                o.update_mask,
-                field_mask_pb2.FieldMask(paths=["biddable"]),
-            )
-            ccg_req.operations.append(o)
-            (changed["biddable_on"] if want else changed["biddable_off"]).append(cat)
-        if ccg_req.operations:
-            try:
-                ccg_service.mutate_campaign_conversion_goals(request=ccg_req)
-            except GoogleAdsException as ex:
-                _raise_tool_error(ex)
+    except GoogleAdsException as ex:
+        _raise_tool_error(ex)
+
+    changed: Dict[str, List[str]] = {"biddable_on": [], "biddable_off": []}
+    ccg_req = client.get_type("MutateCampaignConversionGoalsRequest")
+    ccg_req.customer_id = customer_id
+    for row in rows:
+        g = row.campaign_conversion_goal
+        cat = g.category.name
+        want = cat in wanted
+        if bool(g.biddable) == want:
+            continue
+        o = client.get_type("CampaignConversionGoalOperation")
+        gg = o.update
+        gg.resource_name = g.resource_name
+        gg.biddable = want
+        client.copy_from(
+            o.update_mask,
+            field_mask_pb2.FieldMask(paths=["biddable"]),
+        )
+        ccg_req.operations.append(o)
+        (changed["biddable_on"] if want else changed["biddable_off"]).append(
+            cat
+        )
+    if confirm and ccg_req.operations:
+        ccg_service = utils.get_googleads_service(
+            "CampaignConversionGoalService"
+        )
+        try:
+            ccg_service.mutate_campaign_conversion_goals(request=ccg_req)
+        except GoogleAdsException as ex:
+            _raise_tool_error(ex)
 
     details: Dict[str, Any] = {
         "customer_id": customer_id,
@@ -1442,9 +1532,7 @@ def campaign_set_conversion_goals(
         "biddable_categories": sorted(wanted),
         "changed": changed,
     }
-    return _preview_or_done(
-        confirm, "campaign_set_conversion_goals", details
-    )
+    return _preview_or_done(confirm, "campaign_set_conversion_goals", details)
 
 
 @mutate_mcp.tool(annotations=_WRITE_ANNOTATIONS)
@@ -1459,6 +1547,9 @@ def campaign_set_custom_conversion_goal(
 
     Find goal ids via search on resource custom_conversion_goal, or copy
     from a sibling campaign via resource conversion_goal_campaign_config.
+    All standard category goals that are still biddable get switched off;
+    the dry-run counts them in "disabled_category_goals".
+
     SAFETY: dry-run by default (validate_only); re-run with confirm=true.
 
     Args:
@@ -1473,18 +1564,14 @@ def campaign_set_custom_conversion_goal(
     customer_id = _clean_customer_id(customer_id)
 
     client = utils.get_googleads_client()
-    service = utils.get_googleads_service(
-        "ConversionGoalCampaignConfigService"
-    )
+    service = utils.get_googleads_service("ConversionGoalCampaignConfigService")
 
     operation = client.get_type("ConversionGoalCampaignConfigOperation")
     config = operation.update
     config.resource_name = (
         f"customers/{customer_id}/conversionGoalCampaignConfigs/{campaign_id}"
     )
-    config.goal_config_level = (
-        client.enums.GoalConfigLevelEnum.CAMPAIGN
-    )
+    config.goal_config_level = client.enums.GoalConfigLevelEnum.CAMPAIGN
     config.custom_conversion_goal = (
         f"customers/{customer_id}/customConversionGoals/"
         f"{custom_conversion_goal_id}"
@@ -1507,47 +1594,44 @@ def campaign_set_custom_conversion_goal(
         _raise_tool_error(ex)
 
     # Match UI behaviour: disable all standard category goals so only the
-    # custom goal is used for bidding (the UI template does the same).
-    disabled_categories = 0
-    if confirm:
-        ga_service = utils.get_googleads_service("GoogleAdsService")
+    # custom goal is used for bidding (the UI template does the same). The
+    # read runs in both branches so the dry-run reports the real count.
+    ga_service = utils.get_googleads_service("GoogleAdsService")
+    try:
+        rows = list(
+            ga_service.search(
+                customer_id=customer_id,
+                query=(
+                    "SELECT campaign_conversion_goal.resource_name, "
+                    "campaign_conversion_goal.biddable "
+                    "FROM campaign_conversion_goal "
+                    f"WHERE campaign.id = {int(campaign_id)} "
+                    "AND campaign_conversion_goal.biddable = true"
+                ),
+            )
+        )
+    except GoogleAdsException as ex:
+        _raise_tool_error(ex)
+
+    disabled_categories = len(rows)
+    if confirm and rows:
         ccg_service = utils.get_googleads_service(
             "CampaignConversionGoalService"
         )
-        try:
-            rows = list(
-                ga_service.search(
-                    customer_id=customer_id,
-                    query=(
-                        "SELECT campaign_conversion_goal.resource_name, "
-                        "campaign_conversion_goal.biddable "
-                        "FROM campaign_conversion_goal "
-                        f"WHERE campaign.id = {int(campaign_id)} "
-                        "AND campaign_conversion_goal.biddable = true"
-                    ),
-                )
+        ccg_request = client.get_type("MutateCampaignConversionGoalsRequest")
+        ccg_request.customer_id = customer_id
+        for row in rows:
+            op = client.get_type("CampaignConversionGoalOperation")
+            goal = op.update
+            goal.resource_name = row.campaign_conversion_goal.resource_name
+            goal.biddable = False
+            client.copy_from(
+                op.update_mask,
+                field_mask_pb2.FieldMask(paths=["biddable"]),
             )
-            if rows:
-                ccg_request = client.get_type(
-                    "MutateCampaignConversionGoalsRequest"
-                )
-                ccg_request.customer_id = customer_id
-                for row in rows:
-                    op = client.get_type("CampaignConversionGoalOperation")
-                    goal = op.update
-                    goal.resource_name = (
-                        row.campaign_conversion_goal.resource_name
-                    )
-                    goal.biddable = False
-                    client.copy_from(
-                        op.update_mask,
-                        field_mask_pb2.FieldMask(paths=["biddable"]),
-                    )
-                    ccg_request.operations.append(op)
-                ccg_service.mutate_campaign_conversion_goals(
-                    request=ccg_request
-                )
-                disabled_categories = len(rows)
+            ccg_request.operations.append(op)
+        try:
+            ccg_service.mutate_campaign_conversion_goals(request=ccg_request)
         except GoogleAdsException as ex:
             _raise_tool_error(ex)
 

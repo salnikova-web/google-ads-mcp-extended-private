@@ -14,6 +14,11 @@ COPY . .
 # We use --system to install into the system Python environment in the container
 RUN uv pip install --system .
 
+# Run as an unprivileged user; the package is installed system-wide, so the
+# entry point stays on PATH and readable.
+RUN useradd --create-home --shell /usr/sbin/nologin mcp
+USER mcp
+
 # Expose port 8080 (default for Cloud Run)
 EXPOSE 8080
 

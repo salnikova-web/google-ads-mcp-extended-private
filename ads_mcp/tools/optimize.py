@@ -74,7 +74,8 @@ def recommendation_apply(
 
     Get resource_names from recommendations_list. NOTE: applying budget or
     bidding recommendations CAN increase spend — review each one first.
-    With confirm=false nothing is sent to Google.
+    With confirm=false nothing is sent to Google Ads, so the preview is
+    computed locally and nothing is validated.
 
     Args:
         customer_id: The client account id (digits only, no hyphens).
@@ -94,6 +95,7 @@ def recommendation_apply(
                 "would_apply": resource_names,
                 "count": len(resource_names),
             },
+            validated=False,
         )
 
     client = utils.get_googleads_client()
@@ -116,7 +118,7 @@ def recommendation_apply(
         "optimize_recommendation_apply",
         {
             "customer_id": customer_id,
-            "applied": [r.resource_name for r in response.results],
+            "applied_resources": [r.resource_name for r in response.results],
         },
     )
 
@@ -129,7 +131,8 @@ def recommendation_dismiss(
 ) -> Dict[str, Any]:
     """Dismisses Google recommendations (removes them from the list).
 
-    With confirm=false nothing is sent to Google.
+    With confirm=false nothing is sent to Google Ads, so the preview is
+    computed locally and nothing is validated.
 
     Args:
         customer_id: The client account id (digits only, no hyphens).
@@ -149,6 +152,7 @@ def recommendation_dismiss(
                 "would_dismiss": resource_names,
                 "count": len(resource_names),
             },
+            validated=False,
         )
 
     client = utils.get_googleads_client()
@@ -257,7 +261,9 @@ def change_history(
     start = now - datetime.timedelta(days=days)
     # The API rejects a start strictly older than 30 days (START_DATE_TOO_OLD);
     # keep a small safety buffer so days=30 still works.
-    min_start = now - datetime.timedelta(days=30) + datetime.timedelta(minutes=5)
+    min_start = (
+        now - datetime.timedelta(days=30) + datetime.timedelta(minutes=5)
+    )
     if start < min_start:
         start = min_start
     start_s = start.strftime("%Y-%m-%d %H:%M:%S")
@@ -279,9 +285,7 @@ def change_history(
         "change_event.changed_fields"
     )
     if include_values:
-        fields += (
-            ", change_event.old_resource, change_event.new_resource"
-        )
+        fields += ", change_event.old_resource, change_event.new_resource"
 
     ga_service = utils.get_googleads_service("GoogleAdsService")
     query = (
@@ -544,9 +548,7 @@ def label_apply(
             request.validate_only = not confirm
             for cid in campaign_ids:
                 op = client.get_type("CampaignLabelOperation")
-                op.create.campaign = (
-                    f"customers/{customer_id}/campaigns/{cid}"
-                )
+                op.create.campaign = f"customers/{customer_id}/campaigns/{cid}"
                 op.create.label = label_rn
                 request.operations.append(op)
             response = service.mutate_campaign_labels(request=request)
@@ -559,9 +561,7 @@ def label_apply(
             request.validate_only = not confirm
             for agid in ad_group_ids:
                 op = client.get_type("AdGroupLabelOperation")
-                op.create.ad_group = (
-                    f"customers/{customer_id}/adGroups/{agid}"
-                )
+                op.create.ad_group = f"customers/{customer_id}/adGroups/{agid}"
                 op.create.label = label_rn
                 request.operations.append(op)
             response = service.mutate_ad_group_labels(request=request)

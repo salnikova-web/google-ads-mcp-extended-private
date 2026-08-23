@@ -16,7 +16,7 @@
 
 import os
 import importlib.resources
-from typing import Any, Dict, List, Union
+from typing import Any, Dict
 import yaml
 import logging
 
@@ -28,7 +28,24 @@ DEFAULT_CONFIG_FILE = "tools_config.yaml"
 CONFIG_PATH_ENV_VAR = "GOOGLE_ADS_MCP_TOOLS_CONFIG"
 
 # Default categories that are supported by the server
-ALL_CATEGORIES = ["customers", "search", "metadata", "mutate", "demandgen", "pmax", "extensions", "targeting", "shopping", "video", "display", "tracking", "audiences", "optimize", "negatives", "experiments"]
+ALL_CATEGORIES = [
+    "customers",
+    "search",
+    "metadata",
+    "mutate",
+    "demandgen",
+    "pmax",
+    "extensions",
+    "targeting",
+    "shopping",
+    "video",
+    "display",
+    "tracking",
+    "audiences",
+    "optimize",
+    "negatives",
+    "experiments",
+]
 
 
 class ToolsConfig:
@@ -36,6 +53,47 @@ class ToolsConfig:
 
     def __init__(self, config_dict: Dict[str, Any] | None = None):
         self._config = config_dict or {}
+        self._warn_unknown_namespaces()
+
+    def _namespaces(self) -> Dict[str, Any] | None:
+        """Returns the configured namespaces mapping, or None if unconfigured.
+
+        Distinguishes "no configuration at all" from "configured to enable
+        nothing": a missing ``namespaces`` key returns None (callers then fall
+        back to their enable-everything default), while a key that is present
+        but empty -- ``{}``, or ``namespaces:`` with no children, which YAML
+        parses as None -- returns an empty mapping and therefore enables
+        nothing.
+        """
+        if "namespaces" not in self._config:
+            return None
+
+        namespaces = self._config["namespaces"] or {}
+        if not isinstance(namespaces, dict):
+            raise ValueError(
+                "'namespaces' must be a YAML mapping/dictionary, got "
+                f"{type(namespaces).__name__}."
+            )
+        return namespaces
+
+    def _warn_unknown_namespaces(self) -> None:
+        """Logs namespace keys the server does not know about.
+
+        A typo such as ``demand_gen`` is otherwise silently ignored, leaving
+        the namespace the user meant to configure at its default.
+        """
+        namespaces = self._namespaces()
+        if not namespaces:
+            return
+
+        unknown = [key for key in namespaces if key not in ALL_CATEGORIES]
+        if unknown:
+            logger.warning(
+                "Ignoring unknown tool namespace(s) in configuration: %s. "
+                "Known namespaces: %s.",
+                ", ".join(str(key) for key in unknown),
+                ", ".join(ALL_CATEGORIES),
+            )
 
     @classmethod
     def _resolve_config_path(cls, filepath: str | None) -> str | None:
@@ -57,10 +115,19 @@ class ToolsConfig:
                 raise FileNotFoundError(
                     f"Tools configuration file '{explicit}' not found."
                 )
+            logger.info(
+                "Using explicitly requested tools configuration '%s'.",
+                explicit,
+            )
             return explicit
 
         # 3: a config file in the working directory acts as a user override.
         if os.path.exists(DEFAULT_CONFIG_FILE):
+            logger.info(
+                "Using tools configuration '%s' found in the working "
+                "directory.",
+                os.path.abspath(DEFAULT_CONFIG_FILE),
+            )
             return DEFAULT_CONFIG_FILE
 
         # 4: fall back to the default config bundled with the package so that
@@ -70,8 +137,10 @@ class ToolsConfig:
         )
         if bundled.is_file():
             logger.info(
-                "No local '%s' found; using the bundled default configuration.",
+                "No local '%s' found; using the bundled default "
+                "configuration '%s'.",
                 DEFAULT_CONFIG_FILE,
+                bundled,
             )
             return str(bundled)
 
@@ -110,8 +179,8 @@ class ToolsConfig:
 
     def is_namespace_enabled(self, category: str) -> bool:
         """Determines if a tool category/namespace is enabled."""
-        namespaces = self._config.get("namespaces", {})
-        if not namespaces:
+        namespaces = self._namespaces()
+        if namespaces is None:
             # By default, if no config is specified, all known categories are enabled
             return category in ALL_CATEGORIES
 
@@ -135,8 +204,8 @@ class ToolsConfig:
 
         Returns None if no prefix should be applied.
         """
-        namespaces = self._config.get("namespaces", {})
-        if not namespaces:
+        namespaces = self._namespaces()
+        if namespaces is None:
             return category
 
         category_config = namespaces.get(category)
@@ -160,8 +229,8 @@ class ToolsConfig:
         if not self.is_namespace_enabled(category):
             return False
 
-        namespaces = self._config.get("namespaces", {})
-        if not namespaces:
+        namespaces = self._namespaces()
+        if namespaces is None:
             return True
 
         category_config = namespaces.get(category)
@@ -189,4 +258,15 @@ class ToolsConfig:
                         return True
             return False
 
-        return True
+        # The natural YAML spelling (enabled_tools: {tool: false}) parses to a
+        # mapping; treat it like the list form rather than silently enabling
+        # everything, including the tool the user tried to disable.
+        if isinstance(enabled_tools, dict):
+            if tool_name in enabled_tools:
+                return bool(enabled_tools[tool_name])
+            return False
+
+        raise ValueError(
+            f"enabled_tools for namespace '{category}' must be a list or a "
+            f"mapping, got {type(enabled_tools).__name__}"
+        )
