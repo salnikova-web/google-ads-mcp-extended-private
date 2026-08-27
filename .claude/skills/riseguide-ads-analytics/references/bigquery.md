@@ -1,5 +1,15 @@
 # BigQuery: таблиці, схема, пастки даних
 
+## Сервер bigquery-mcp (інфраструктура)
+
+Встановлено персистентно: `pipx install bigquery-mcp` на **Python 3.12**
+(uv-managed `~/.local/share/uv/python/cpython-3.12-…`). На Python 3.14
+пакет 0.1.6 ПАДАЄ на старті (`ValueError: invalid option name
+'--no-vector-search'` — argparse 3.14 суворіший). Оновлення:
+`pipx reinstall bigquery-mcp --python <той самий 3.12>`. Конфіг Desktop
+вказує на `~/.local/bin/bigquery-mcp` (до 28.08 був `uvx` — старт ~10 с
+щоразу; тепер ~2 с).
+
 ## Мапа таблиць
 
 | Потрібно | Таблиця |
