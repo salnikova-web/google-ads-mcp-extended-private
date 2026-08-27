@@ -6,19 +6,29 @@ Python MCP-сервер `google-ads-mcp` (FastMCP) для Google Ads API:
 
 ## КРИТИЧНЕ: ланцюг доставки
 
-- Claude Desktop запускає сервер через `pipx run --spec git+…` з репозиторію
-  **`riseguide/google-ads-mcp-extended`**. Цей локальний чекаут пушить в
-  **`salnikova-web/google-ads-mcp-extended`**. Це РІЗНІ репозиторії: локальні
-  зміни не впливають на живі інструменти, поки не потраплять у `riseguide`
-  і Desktop не перезапущено. «Перезапустити MCP-клієнт» — обов'язковий крок,
+- З 28.08.2026 Claude Desktop запускає сервер із бінарника
+  `~/.local/bin/google-ads-mcp`, встановленого з **ЦЬОГО репозиторію**:
+  `pipx install 'google-ads-mcp @ git+file:///Users/user/Documents/Develop/google-ads-mcp-extended@main'`.
+  Живе ТІЛЬКИ закомічене в `main`. Ланцюг оновлення:
+  `git commit` → `pipx install --force 'google-ads-mcp @ git+file://…@main'`
+  → рестарт Desktop (⌘Q). «Перезапустити MCP-клієнт» — обов'язковий крок,
   клієнт тримає стару версію в пам'яті (граблина, повторена тричі).
-- Локальний `ads_mcp/tools_config.yaml` живим сервером НЕ читається
-  (env не задає `GOOGLE_ADS_MCP_TOOLS_CONFIG`, cwd сервера — тимчасова
-  директорія pipx → перемагає bundled-конфіг віддаленого репо).
+- НЕЗАКОМІЧЕНІ правки на живий сервер не впливають ніколи. Так само
+  `ads_mcp/tools_config.yaml` бандлиться в інсталяцію — його правки теж
+  потребують commit + reinstall.
+- Історія: до 28.08 сервер тягнувся `pipx run --spec git+…riseguide/…`
+  (інший репозиторій!) без піна — це давало старти 16–61 с і 12 ГБ кешу
+  uv. НЕ повертатись до `pipx run`. Пуш у `salnikova-web` = бекап, на
+  живий сервер не впливає.
+- Після `brew upgrade` python сервер може не стартувати →
+  `pipx reinstall google-ads-mcp`.
+- `.claude/skills/` — частина цього репо: доменні скіли
+  `riseguide-ads-analytics` / `riseguide-ads-ops` версіонуються разом
+  із кодом.
 - Перевірка, чи встановлений пакет: `find_spec('ads_mcp')` запускати
   **з-поза директорії репо** — зсередини cwd дає хибний позитив.
-- `claude_desktop_config.json` містить секрети відкритим текстом (PAT,
-  developer token) — грепати вузько, не тягнути в контекст зайвого.
+- `claude_desktop_config.json` містить секрети відкритим текстом
+  (developer token) — грепати вузько, не тягнути в контекст зайвого.
 
 ## Команди
 
