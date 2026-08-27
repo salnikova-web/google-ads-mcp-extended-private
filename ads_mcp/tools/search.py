@@ -26,6 +26,29 @@ from google.ads.googleads.errors import GoogleAdsException
 from fastmcp.exceptions import ToolError
 
 
+def _rows_to_markdown(rows: List[Dict[str, Any]]) -> str:
+    if not rows:
+        return "(no rows)"
+    columns: List[str] = []
+    for row in rows:
+        for key in row:
+            if key not in columns:
+                columns.append(key)
+
+    def cell(value: Any) -> str:
+        return str(value).replace("|", "\\|").replace("\n", " ")
+
+    lines = [
+        "| " + " | ".join(columns) + " |",
+        "| " + " | ".join("---" for _ in columns) + " |",
+    ]
+    for row in rows:
+        lines.append(
+            "| " + " | ".join(cell(row.get(c, "")) for c in columns) + " |"
+        )
+    return "\n".join(lines)
+
+
 def search(
     customer_id: str,
     fields: List[str],
@@ -33,7 +56,9 @@ def search(
     conditions: List[str] = [],
     orderings: List[str] = [],
     limit: int | None = None,
-) -> List[Dict[str, Any]]:
+    offset: int = 0,
+    response_format: str = "json",
+) -> Dict[str, Any]:
     """Fetches data from the Google Ads API using the search method
 
     Args:
@@ -42,9 +67,21 @@ def search(
         resource: The resource to return fields from
         conditions: List of conditions to filter the data, combined using AND clauses
         orderings: How the data is ordered
-        limit: The maximum number of rows to return
+        limit: The maximum number of rows to return in this page; omit to fetch everything
+        offset: Number of leading rows to skip; pass next_offset from the previous page
+        response_format: "json" (default) returns rows in `results`; "markdown" returns a rendered table in `results_markdown`
 
+    Returns a pagination envelope:
+        {count, offset, total, has_more, next_offset, results|results_markdown}.
+        `total` is only known once the result set is exhausted (has_more is
+        false); until then it is null. When has_more is true, repeat the call
+        with offset=next_offset to get the next page.
     """
+
+    if offset < 0:
+        raise ToolError("offset must be >= 0")
+    if response_format not in ("json", "markdown"):
+        raise ToolError('response_format must be "json" or "markdown"')
 
     ga_service = utils.get_googleads_service("GoogleAdsService")
 
@@ -57,7 +94,13 @@ def search(
         query_parts.append(f" ORDER BY {','.join(orderings)}")
 
     if limit is not None:
-        query_parts.append(f" LIMIT {int(limit)}")
+        # GAQL has no OFFSET clause: fetch offset+limit rows plus one probe
+        # row whose only job is to signal has_more, then slice locally.
+        fetch_limit = offset + int(limit) + 1
+        if resource == "change_event" and fetch_limit > 10000:
+            # change_event rejects LIMIT > 10000; the probe degrades there.
+            fetch_limit = 10000
+        query_parts.append(f" LIMIT {fetch_limit}")
 
     query_parts.append(" PARAMETERS omit_unselected_resource_names=true")
 
@@ -66,26 +109,42 @@ def search(
     # does not belong in default server output.
     utils.logger.debug(f"ads_mcp.search query {query}")
 
+    rows: List[Dict[str, Any]] = []
     try:
         query_result = ga_service.search_stream(
             customer_id=customer_id, query=query
         )
 
-        final_output: List = []
         for batch in query_result:
             for row in batch.results:
-                final_output.append(
+                rows.append(
                     utils.format_output_row(row, batch.field_mask.paths)
                 )
-        return final_output
     except GoogleAdsException as ex:
-        error_msgs = [
-            f"Google Ads API Error: {error.message}"
-            for error in ex.failure.errors
-        ]
-        raise ToolError(
-            f"Request ID: {ex.request_id}\n" + "\n".join(error_msgs)
-        )
+        utils.raise_tool_error(ex)
+
+    if limit is not None:
+        page = rows[offset : offset + int(limit)]
+        has_more = len(rows) > offset + int(limit)
+        next_offset = offset + int(limit) if has_more else None
+    else:
+        page = rows[offset:] if offset else rows
+        has_more = False
+        next_offset = None
+    total = None if has_more else offset + len(page)
+
+    envelope: Dict[str, Any] = {
+        "count": len(page),
+        "offset": offset,
+        "total": total,
+        "has_more": has_more,
+        "next_offset": next_offset,
+    }
+    if response_format == "markdown":
+        envelope["results_markdown"] = _rows_to_markdown(page)
+    else:
+        envelope["results"] = page
+    return envelope
 
 
 def _search_tool_description() -> str:

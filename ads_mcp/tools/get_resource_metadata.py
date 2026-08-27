@@ -29,10 +29,7 @@ _RESOURCE_NAME = re.compile(r"\A[a-z][a-z0-9_]*\Z")
 
 def _raise_tool_error(ex: GoogleAdsException) -> None:
     """Reports a Google Ads failure without leaking the raw gRPC text."""
-    error_msgs = [
-        f"Google Ads API Error: {error.message}" for error in ex.failure.errors
-    ]
-    raise ToolError(f"Request ID: {ex.request_id}\n" + "\n".join(error_msgs))
+    utils.raise_tool_error(ex)
 
 
 def _collect_fields(

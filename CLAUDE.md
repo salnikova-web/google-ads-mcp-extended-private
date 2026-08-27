@@ -44,6 +44,11 @@ python -m unittest tests.tools.mutate_test.КЛАС.тест   # один тес
 - Патерн тестових файлів — `*_test.py`, НЕ `test_*.py`. Файл із
   неправильним іменем мовчки не запускається (приклад:
   `tests/smoke/test_token_usage.py` — ніколи не бігав).
+- `tests/smoke/` не має `__init__.py` → `unittest discover` мовчки
+  пропускає ВЕСЬ смоук-пакет (виявлено 28.08: повний прогін «зелений»
+  при зламаних goldens). Смоук ганяти окремо:
+  `.venv/bin/python -m unittest tests.smoke.smoke_test`. Не додавати
+  `__init__.py` мимохідь — це увімкне в discover і llm_test.
 - `nox -s lint` історично червоний ще до правок (black не запінений).
 
 ## Тести: правила

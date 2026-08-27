@@ -319,3 +319,65 @@ def get_gaql_resources_filepath():
     package_root = importlib.resources.files("ads_mcp")
     file_path = package_root.joinpath(_GAQL_FILENAME)
     return file_path
+
+
+# Matched as substrings against "<error_code> <message>" uppercased; each
+# matching hint is appended once to the raised ToolError.
+_GOOGLE_ADS_ERROR_HINTS = (
+    (
+        "UNRECOGNIZED_FIELD",
+        "verify field names with the get_resource_metadata tool",
+    ),
+    (
+        "INVALID_FIELD",
+        "verify field names with the get_resource_metadata tool",
+    ),
+    (
+        "PROHIBITED_FIELD",
+        "check field compatibility with the get_resource_metadata tool",
+    ),
+    (
+        "AUTHENTICATION",
+        "credential problem - not retryable, fix auth before retrying",
+    ),
+    (
+        "AUTHORIZATION",
+        "access problem - check customer_id / login customer, not retryable",
+    ),
+    (
+        "QUOTA",
+        "rate/quota exceeded - wait before retrying, reduce request size",
+    ),
+    (
+        "RESOURCE_EXHAUSTED",
+        "rate/quota exceeded - wait before retrying, reduce request size",
+    ),
+)
+
+
+def raise_tool_error(ex) -> None:
+    """Raises a ToolError for a GoogleAdsException, shared by all modules.
+
+    Per error: message + error code + offending field path; plus one
+    deduplicated actionable hint line per matched failure class.
+    """
+    error_msgs = []
+    hints = []
+    for error in ex.failure.errors:
+        field_path = ""
+        if error.location and error.location.field_path_elements:
+            field_path = ".".join(
+                fpe.field_name for fpe in error.location.field_path_elements
+            )
+        code = str(error.error_code).strip().replace("\n", " ")
+        msg = f"Google Ads API Error: {error.message} [{code}]"
+        if field_path:
+            msg += f" (field: {field_path})"
+        error_msgs.append(msg)
+        haystack = f"{code} {error.message}".upper()
+        for needle, hint in _GOOGLE_ADS_ERROR_HINTS:
+            if needle in haystack and hint not in hints:
+                hints.append(hint)
+    lines = [f"Request ID: {ex.request_id}"] + error_msgs
+    lines.extend(f"Hint: {hint}." for hint in hints)
+    raise ToolError("\n".join(lines))

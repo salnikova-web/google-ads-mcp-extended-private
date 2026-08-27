@@ -59,20 +59,9 @@ _ALLOWED_BIDDING = [
 _ALLOWED_CAMPAIGN_STATUSES = ["ENABLED", "PAUSED", "REMOVED"]
 
 
+# Kept under this name: 12 write modules import it from here.
 def _raise_tool_error(ex: GoogleAdsException) -> None:
-    error_msgs = []
-    for error in ex.failure.errors:
-        field_path = ""
-        if error.location and error.location.field_path_elements:
-            field_path = ".".join(
-                fpe.field_name for fpe in error.location.field_path_elements
-            )
-        code = str(error.error_code).strip().replace("\n", " ")
-        msg = f"Google Ads API Error: {error.message} [{code}]"
-        if field_path:
-            msg += f" (field: {field_path})"
-        error_msgs.append(msg)
-    raise ToolError(f"Request ID: {ex.request_id}\n" + "\n".join(error_msgs))
+    utils.raise_tool_error(ex)
 
 
 def _to_micros(amount: float) -> int:
