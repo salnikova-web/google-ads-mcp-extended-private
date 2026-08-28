@@ -172,8 +172,15 @@ def list_assets(
     asset_type: str = "IMAGE",
     name_contains: Optional[str] = None,
     limit: int = 50,
-) -> List[Dict[str, Any]]:
-    """Lists assets in the account (id, name, type) for use in DG ads.
+) -> Dict[str, Any]:
+    """Lists assets (id, name, type) for reuse in DG ads; envelope, not a
+    bare list.
+
+    Returns {items, returned, truncated, warning?}. A missing asset may
+    still exist — this list feeds asset-id selection before creating an
+    ad, and re-uploading an asset that is merely off the page duplicates
+    it. If truncated: raise limit before assuming the asset needs
+    re-uploading, and tell the user the list is incomplete.
 
     Args:
         customer_id: The client account id (digits only, no hyphens).
@@ -190,10 +197,11 @@ def list_assets(
     where = f"WHERE asset.type = '{asset_type}'"
     if name_contains:
         where += f" AND asset.name LIKE '%{utils.gaql_str(name_contains)}%'"
+    cap = int(limit)
     query = (
         "SELECT asset.id, asset.name, asset.type, "
         "asset.youtube_video_asset.youtube_video_id "
-        f"FROM asset {where} LIMIT {int(limit)}"
+        f"FROM asset {where} ORDER BY asset.id LIMIT {cap + 1}"
     )
     try:
         rows = ga_service.search(customer_id=customer_id, query=query)
@@ -209,7 +217,7 @@ def list_assets(
                     row.asset.youtube_video_asset.youtube_video_id
                 )
             out.append(item)
-        return out
+        return utils.list_envelope(out, cap)
     except GoogleAdsException as ex:
         _raise_tool_error(ex)
 

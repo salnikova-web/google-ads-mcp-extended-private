@@ -318,6 +318,41 @@ def get_gaql_resources_filepath():
     return file_path
 
 
+def truncation_warning(cap: int) -> str:
+    """The standard warning for a list truncated at `cap` items.
+
+    Truncation must never be silent: a missing item is not proof it does
+    not exist, so every truncated list envelope carries this string and
+    every truncating tool's docstring tells the agent to relay it.
+    """
+    return (
+        f"list truncated at {cap} items — more exist beyond the cap; a "
+        "missing item is NOT proof it does not exist. Raise 'limit' or "
+        "narrow the filter before concluding absence, and tell the user "
+        "the list is incomplete."
+    )
+
+
+def list_envelope(items: list[Any], cap: int) -> dict[str, Any]:
+    """Wraps a probe-fetched list into the shared truncation envelope.
+
+    `items` must already hold at most `cap + 1` rows (the caller fetches
+    one extra "probe" row to detect overflow without a separate count
+    query). Returns {"items", "returned", "truncated"} and, only when
+    truncated, a "warning" key from `truncation_warning`.
+    """
+    truncated = len(items) > cap
+    page = items[:cap] if truncated else items
+    envelope: dict[str, Any] = {
+        "items": page,
+        "returned": len(page),
+        "truncated": truncated,
+    }
+    if truncated:
+        envelope["warning"] = truncation_warning(cap)
+    return envelope
+
+
 # Matched as substrings against "<error_code> <message>" uppercased; each
 # matching hint is appended once to the raised ToolError.
 _GOOGLE_ADS_ERROR_HINTS = (

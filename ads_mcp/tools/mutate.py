@@ -1368,13 +1368,25 @@ def keywords_ideas(
     language_id: str = "1000",
     geo_ids: List[str] = [],
     limit: int = 30,
-) -> List[Dict[str, Any]]:
-    """Generates keyword ideas from Google Keyword Planner.
+) -> Dict[str, Any]:
+    """Generates keyword ideas from Google Keyword Planner; envelope, not
+    a bare list.
 
-    Read-only. Seed with keywords and/or a landing page URL. language_id:
-    1000=en, 1002=fr, 1001=de... geo_ids: e.g. ["2840"] for US; empty =
-    all locations. Returns text, avg monthly searches, competition and
-    top-of-page bid range, sorted by search volume.
+    Read-only. Returns {items, returned, truncated, warning?}: each item
+    has text, avg monthly searches, competition and top-of-page bid range.
+    Order is whatever the Keyword Planner API returns — not sorted by
+    this tool. If truncated: raise limit before concluding an idea does
+    not exist, and tell the user the list is incomplete.
+
+    Args:
+        customer_id: The client account id (digits only, no hyphens).
+        seed_keywords: Seed keywords; pass these and/or page_url.
+        page_url: Landing page URL to seed ideas from.
+        language_id: Keyword Planner language constant id (1000=en,
+            1002=fr, 1001=de...).
+        geo_ids: Geo target constant ids, e.g. ["2840"] for US; empty =
+            all locations.
+        limit: Max ideas to return (default 30).
     """
     customer_id = _clean_customer_id(customer_id)
     if not seed_keywords and not page_url:
@@ -1406,6 +1418,7 @@ def keywords_ideas(
     except GoogleAdsException as ex:
         _raise_tool_error(ex)
 
+    cap = int(limit)
     out: List[Dict[str, Any]] = []
     for idea in response:
         m = idea.keyword_idea_metrics
@@ -1422,9 +1435,9 @@ def keywords_ideas(
                 ),
             }
         )
-        if len(out) >= int(limit):
+        if len(out) >= cap + 1:
             break
-    return out
+    return utils.list_envelope(out, cap)
 
 
 @mutate_mcp.tool(annotations=_WRITE_ANNOTATIONS)
@@ -1824,10 +1837,17 @@ def list_campaigns(
     status: Optional[str] = None,
     include_removed: bool = False,
     limit: int = 100,
-) -> List[Dict[str, Any]]:
-    """Convenience helper: lists campaigns with id, name, status, budget.
+) -> Dict[str, Any]:
+    """Lists campaigns (id, name, status, budget); envelope, not a bare
+    list.
 
-    Useful before calling the write tools to find campaign ids.
+    Useful before calling the write tools to find campaign ids. Returns
+    {items, returned, truncated, warning?}. A campaign missing from a
+    truncated list means "not on this page", NOT "does not exist" — this
+    list feeds duplicate-name checks before campaign_create, so a
+    truncated result must never be read as a clean name search. If
+    truncated: raise limit or narrow the filter, and tell the user the
+    list is incomplete before concluding a name is free.
 
     Args:
         customer_id: The client account id (digits only, no hyphens).
@@ -1849,15 +1869,16 @@ def list_campaigns(
     elif not include_removed:
         conditions.append("campaign.status != 'REMOVED'")
     where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+    cap = int(limit)
     query = (
         "SELECT campaign.id, campaign.name, campaign.status, "
         "campaign.advertising_channel_type, campaign_budget.amount_micros "
         f"FROM campaign {where} ORDER BY campaign.status ASC, "
-        f"campaign.name ASC LIMIT {int(limit)}"
+        f"campaign.name ASC LIMIT {cap + 1}"
     )
     try:
         rows = ga_service.search(customer_id=customer_id, query=query)
-        return [
+        items = [
             {
                 "id": str(row.campaign.id),
                 "name": row.campaign.name,
@@ -1867,6 +1888,7 @@ def list_campaigns(
             }
             for row in rows
         ]
+        return utils.list_envelope(items, cap)
     except GoogleAdsException as ex:
         _raise_tool_error(ex)
 
