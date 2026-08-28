@@ -17,7 +17,7 @@
 # change-history. All write tools here still default to a dry-run preview
 # behind the `confirm` parameter (see README-EXTENDED.md, "Safety model").
 #
-# Approximate tools/list weight: ~65.5KB, about 51% smaller than the full
+# Approximate tools/list weight: ≈81.9 KB, about 44% smaller than the full
 # 16-namespace default. See README-EXTENDED.md for the per-namespace
 # token-cost table these numbers come from.
 #
