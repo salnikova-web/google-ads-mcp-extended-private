@@ -145,13 +145,5 @@ python -m unittest tests.tools.mutate_test.КЛАС.тест   # один тес
   інстальованому dist-info — єдина правда для pipx-VCS-інсталяцій;
   deploy-гейт звіряє його з `git rev-parse HEAD`.
 
-## Відомі хвости (не «лагодити» мимохідь, окремі задачі)
-
-- Бандл-скіл `ads_mcp/skills/account-performance-diagnostics/` не пакується
-  (MANIFEST.in без `.md`) і має 2 дефекти: `metrics.conversion_value` →
-  правильно `conversions_value`; непрефіксовані імена інструментів
-  (`search` → `search_search`, `get_resource_metadata` →
-  `metadata_get_resource_metadata`).
-
 Доменні правила аналітики RiseGuide тут НЕ живуть — вони в персональних
 скілах (`~/.claude/skills/`).
