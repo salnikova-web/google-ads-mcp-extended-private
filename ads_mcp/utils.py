@@ -22,9 +22,6 @@ from google.protobuf.message import Message as PbMessage
 from google.protobuf.json_format import MessageToDict
 import logging
 from google.ads.googleads.client import GoogleAdsClient
-from google.ads.googleads.v24.services.services.google_ads_service import (
-    GoogleAdsServiceClient,
-)
 
 from fastmcp.exceptions import ToolError
 from google.ads.googleads.util import get_nested_attr
@@ -271,7 +268,7 @@ def _get_googleads_client() -> GoogleAdsClient:
     return client
 
 
-def get_googleads_service(serviceName: str) -> GoogleAdsServiceClient:
+def get_googleads_service(serviceName: str) -> Any:
     key = _credential_identity() + (
         "service",
         serviceName,
@@ -380,4 +377,9 @@ def raise_tool_error(ex) -> None:
                 hints.append(hint)
     lines = [f"Request ID: {ex.request_id}"] + error_msgs
     lines.extend(f"Hint: {hint}." for hint in hints)
-    raise ToolError("\n".join(lines))
+    message = "\n".join(lines)
+    # The host records only the tool name when a call fails, so the reason
+    # never reaches the server log. Record it here: request id, error codes
+    # and field paths, none of which carry credentials.
+    logger.warning("google-ads tool error:\n%s", message)
+    raise ToolError(message)

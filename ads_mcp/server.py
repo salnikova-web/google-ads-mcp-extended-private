@@ -29,13 +29,81 @@ from ads_mcp.resources import (
 )  # noqa: F401
 
 
+import importlib.metadata
+import json
+import logging
 import os
+import sys
+
+
+def _configure_stderr_logging() -> None:
+    """Gives ads_mcp's own warnings a real destination in this process.
+
+    ads_mcp modules attach only a ``NullHandler`` to their loggers (see
+    ``utils.py``, ``middleware.py``) because configuring logging is the
+    host application's job, not a library's. This entrypoint IS that host,
+    so it is the one place allowed to attach a real handler.
+
+    Without this, a ``logger.warning`` call in ``ads_mcp.utils`` or
+    ``ads_mcp.middleware`` never reaches stderr: fastmcp configures only
+    its own "fastmcp" logger (with ``propagate=False``) and never touches
+    the root logger, and the ``NullHandler`` already on the "ads_mcp.*"
+    loggers counts as a handler having "found" the record, which silently
+    suppresses logging's own ``lastResort`` fallback even though nothing
+    ever actually printed the record anywhere.
+
+    Guarded against attaching twice (e.g. ``run_server`` invoked more than
+    once in the same process, such as under test).
+    """
+    package_logger = logging.getLogger("ads_mcp")
+    already_configured = any(
+        isinstance(existing, logging.StreamHandler)
+        for existing in package_logger.handlers
+    )
+    if already_configured:
+        return
+
+    handler = logging.StreamHandler(sys.stderr)
+    handler.setLevel(logging.WARNING)
+    handler.setFormatter(
+        logging.Formatter("%(name)s %(levelname)s: %(message)s")
+    )
+    package_logger.addHandler(handler)
+    package_logger.setLevel(logging.WARNING)
+
+
+def _build_startup_line() -> str:
+    """Builds the one-line startup banner: "google-ads-mcp <version> (commit <commit>)".
+
+    Both lookups are wrapped in try/except so any failure (a source checkout
+    with no installed distribution metadata, a pip install -e . with no
+    direct_url.json, etc.) degrades that field to "unknown" instead of
+    preventing the server from starting.
+    """
+    try:
+        version = importlib.metadata.version("google-ads-mcp")
+    except Exception:
+        version = "unknown"
+
+    try:
+        direct_url_text = importlib.metadata.distribution(
+            "google-ads-mcp"
+        ).read_text("direct_url.json")
+        commit = json.loads(direct_url_text)["vcs_info"]["commit_id"]
+    except Exception:
+        commit = "unknown"
+
+    return f"google-ads-mcp {version} (commit {commit})"
 
 
 def run_server() -> None:
     _CLIENT_ID = os.environ.get("GOOGLE_ADS_MCP_OAUTH_CLIENT_ID")
     _CLIENT_SECRET = os.environ.get("GOOGLE_ADS_MCP_OAUTH_CLIENT_SECRET")
     port = int(os.environ.get("PORT", "8080"))
+
+    # stdout carries JSON-RPC under the stdio transport; never print here.
+    print(_build_startup_line(), file=sys.stderr)
+    _configure_stderr_logging()
 
     if _CLIENT_ID and _CLIENT_SECRET:
         mcp.run(

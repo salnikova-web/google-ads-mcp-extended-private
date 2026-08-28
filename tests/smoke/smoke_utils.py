@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import contextlib
+import importlib.resources
 import json
 import subprocess
 import sys
@@ -20,17 +21,39 @@ import threading
 import os
 from typing import Any, Dict, List, Optional
 
+TOOLS_CONFIG_ENV_VAR = "GOOGLE_ADS_MCP_TOOLS_CONFIG"
+
+
+def bundled_tools_config_path() -> str:
+    """Returns the absolute path of the tools_config.yaml inside ads_mcp.
+
+    Resolved through the package itself, so it points at whichever copy of
+    ads_mcp is actually importable rather than at a path relative to this
+    file or to the caller's working directory.
+    """
+    path = importlib.resources.files("ads_mcp").joinpath("tools_config.yaml")
+    if not path.is_file():
+        raise RuntimeError(
+            "Bundled ads_mcp/tools_config.yaml not found; smoke runs cannot "
+            "be pinned to a deterministic tool set."
+        )
+    return os.fspath(path)
+
 
 def start_server_process() -> subprocess.Popen:
     """Starts the MCP server as a subprocess."""
     # Ensure the server runs in stdio mode by clearing OAuth proxy env vars.
-    # Also pin the tools config to the bundled default: an ambient
-    # GOOGLE_ADS_MCP_TOOLS_CONFIG would change which tools the server exposes
-    # and make golden generation depend on the developer's machine.
+    # Also pin the tools config to the bundled default: clearing the env var
+    # is not enough, because the server then falls back to a
+    # ./tools_config.yaml in whatever directory the run happens to start
+    # from. Pinning the absolute bundled path removes both that cwd
+    # fallback and any ambient GOOGLE_ADS_MCP_TOOLS_CONFIG, so the exposed
+    # tool list — and therefore the goldens — cannot depend on the
+    # developer's machine.
     env = os.environ.copy()
     env.pop("GOOGLE_ADS_MCP_OAUTH_CLIENT_ID", None)
     env.pop("GOOGLE_ADS_MCP_OAUTH_CLIENT_SECRET", None)
-    env.pop("GOOGLE_ADS_MCP_TOOLS_CONFIG", None)
+    env[TOOLS_CONFIG_ENV_VAR] = bundled_tools_config_path()
 
     return subprocess.Popen(
         [sys.executable, "-m", "ads_mcp.server"],

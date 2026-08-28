@@ -23,6 +23,7 @@ Google Ads fully validates the operation but changes nothing, and the tool
 returns a preview. Call the tool again with ``confirm=True`` to apply.
 """
 
+import math
 import time
 from typing import Any, Dict, List, Optional
 
@@ -37,6 +38,20 @@ import ads_mcp.utils as utils
 mutate_mcp = FastMCP("mutate")
 
 _MICROS = 1_000_000
+
+# Batch tools send one request per call, so the cap keeps a single request
+# (and the approval prompt in front of it) reviewable.
+_BATCH_MAX_ITEMS = 100
+
+# An operation counts as applied only when the API hands back a resource
+# name for it. partial_failure_error does not always pin a failure to an
+# operation index (an error without an `operations` field path cannot be
+# attributed, and a short results list has no entry to read), so "not in the
+# failure map" alone would report an unapplied operation as succeeded.
+_NO_RESULT_ERROR = (
+    "no result returned for this operation - it was NOT applied; verify the "
+    "current state with mutate_list_campaigns"
+)
 
 _WRITE_ANNOTATIONS = ToolAnnotations(readOnlyHint=False, destructiveHint=False)
 
@@ -116,6 +131,49 @@ def _preview_or_done(
         "action": action,
         "note": note,
     }
+
+
+def _check_batch_size(items: Any, param_name: str) -> None:
+    """Rejects an empty or oversized batch before anything is built."""
+    if not items:
+        raise ToolError(f"{param_name} is empty")
+    if len(items) > _BATCH_MAX_ITEMS:
+        raise ToolError(
+            f"{param_name} holds {len(items)} entries, but the batch tools "
+            f"accept at most {_BATCH_MAX_ITEMS} per call. Split the work "
+            "across several calls."
+        )
+
+
+def _partial_failure_errors(client, response) -> Dict[int, str]:
+    """Maps operation index -> error message from partial_failure_error.
+
+    Only meaningful on an apply (partial_failure=true); a dry-run is atomic,
+    so its failures arrive as a GoogleAdsException instead. Sibling of the
+    richer parser inside ``keywords_add``, which additionally digs out policy
+    violation keys.
+    """
+    out: Dict[int, str] = {}
+    pfe = getattr(response, "partial_failure_error", None)
+    details = getattr(pfe, "details", None) if pfe else None
+    if not details:
+        return out
+    failure_cls = type(client.get_type("GoogleAdsFailure"))
+    for detail in details:
+        failure = failure_cls.deserialize(detail.value)
+        for error in failure.errors:
+            idx = None
+            for fpe in error.location.field_path_elements:
+                if fpe.field_name == "operations":
+                    idx = fpe.index
+                    break
+            if idx is None:
+                continue
+            message = error.message.strip()
+            # One operation can collect several errors; keep them all,
+            # otherwise the reported reason depends on iteration order.
+            out[idx] = f"{out[idx]}; {message}" if idx in out else message
+    return out
 
 
 @mutate_mcp.tool(annotations=_WRITE_ANNOTATIONS)
@@ -342,6 +400,140 @@ def campaign_update_status(
 
 
 @mutate_mcp.tool(annotations=_WRITE_ANNOTATIONS)
+def campaign_update_status_batch(
+    customer_id: str,
+    campaign_ids: List[str],
+    status: str,
+    confirm: bool = False,
+) -> Dict[str, Any]:
+    """Pauses or enables SEVERAL campaigns in one request.
+
+    Use this instead of calling mutate_campaign_update_status in a loop
+    whenever three or more campaigns get the same new status: one call, one
+    preview, one approval. For a single campaign — or for REMOVED — use
+    mutate_campaign_update_status.
+
+    Only ENABLED and PAUSED are accepted here. Removing a campaign is
+    irreversible, so it stays one campaign at a time on the single-campaign
+    tool. At most 100 campaign ids per call; duplicates are dropped (kept in
+    first-seen order) and reported in the preview.
+
+    DRY-RUN vs APPLY: with confirm=false (default) the whole batch is
+    validated by Google Ads atomically (validate_only), so one bad id fails
+    the entire preview and nothing is changed. With confirm=true the batch is
+    applied with partial_failure=true, so some campaigns can succeed while
+    others fail — the result reports requested/succeeded/failed counts plus a
+    per-campaign breakdown.
+
+    Args:
+        customer_id: The client account id (digits only, no hyphens).
+        campaign_ids: Numeric campaign ids, up to 100.
+        status: ENABLED or PAUSED (applied to every listed campaign).
+        confirm: False = dry-run preview (default), True = apply changes.
+    """
+    customer_id = _clean_customer_id(customer_id)
+    status = status.upper()
+    if status == "REMOVED":
+        raise ToolError(
+            "status REMOVED is not available in the batch tool: removing a "
+            "campaign is irreversible, so it must be done one campaign at a "
+            "time with mutate_campaign_update_status."
+        )
+    if status not in ("ENABLED", "PAUSED"):
+        raise ToolError("status must be ENABLED or PAUSED")
+    _check_batch_size(campaign_ids, "campaign_ids")
+
+    ordered_ids: List[str] = []
+    seen = set()
+    duplicates: List[str] = []
+    for raw_id in campaign_ids:
+        campaign_id = utils.gaql_id(raw_id)
+        if campaign_id in seen:
+            if campaign_id not in duplicates:
+                duplicates.append(campaign_id)
+            continue
+        seen.add(campaign_id)
+        ordered_ids.append(campaign_id)
+
+    client = utils.get_googleads_client()
+    campaign_service = utils.get_googleads_service("CampaignService")
+
+    request = client.get_type("MutateCampaignsRequest")
+    request.customer_id = customer_id
+    # The API rejects validate_only together with partial_failure: the
+    # dry-run is atomic, the apply is per-operation.
+    request.validate_only = not confirm
+    request.partial_failure = bool(confirm)
+
+    resource_names = [
+        f"customers/{customer_id}/campaigns/{campaign_id}"
+        for campaign_id in ordered_ids
+    ]
+    for resource_name in resource_names:
+        operation = client.get_type("CampaignOperation")
+        campaign = operation.update
+        campaign.resource_name = resource_name
+        campaign.status = client.enums.CampaignStatusEnum[status]
+        # Explicit leaf path: a value-derived mask would drop the status of
+        # whichever enum value happens to be the proto default.
+        operation.update_mask.paths.append("status")
+        request.operations.append(operation)
+
+    try:
+        response = campaign_service.mutate_campaigns(request=request)
+    except GoogleAdsException as ex:
+        _raise_tool_error(ex)
+
+    details: Dict[str, Any] = {
+        "customer_id": customer_id,
+        "new_status": status,
+        "requested": len(ordered_ids),
+        "campaigns": [
+            {
+                "campaign_id": campaign_id,
+                "resource_name": resource_name,
+                "new_status": status,
+            }
+            for campaign_id, resource_name in zip(ordered_ids, resource_names)
+        ],
+    }
+    if duplicates:
+        details["duplicate_campaign_ids_ignored"] = duplicates
+        details["warning"] = (
+            "campaign_ids contained duplicate ids; each campaign is updated "
+            "once."
+        )
+
+    if confirm:
+        failures = _partial_failure_errors(client, response)
+        results = list(response.results)
+        succeeded: List[Dict[str, Any]] = []
+        failed: List[Dict[str, Any]] = []
+        for index, campaign_id in enumerate(ordered_ids):
+            if index in failures:
+                failed.append(
+                    {"campaign_id": campaign_id, "error": failures[index]}
+                )
+                continue
+            resource_name = (
+                results[index].resource_name if index < len(results) else ""
+            )
+            if not resource_name:
+                failed.append(
+                    {"campaign_id": campaign_id, "error": _NO_RESULT_ERROR}
+                )
+                continue
+            succeeded.append(
+                {"campaign_id": campaign_id, "resource_name": resource_name}
+            )
+        details["succeeded"] = len(succeeded)
+        details["failed"] = len(failed)
+        details["succeeded_campaigns"] = succeeded
+        details["failed_campaigns"] = failed
+    return _preview_or_done(confirm, "campaign_update_status_batch", details)
+
+
+@mutate_mcp.tool(annotations=_WRITE_ANNOTATIONS)
 def campaign_set_target_roas(
     customer_id: str,
     campaign_id: str,
@@ -518,13 +710,19 @@ def campaign_update_settings(
         )
     ):
         ga_service = utils.get_googleads_service("GoogleAdsService")
-        rows = ga_service.search(
-            customer_id=customer_id,
-            query=(
-                "SELECT campaign.asset_automation_settings FROM campaign "
-                f"WHERE campaign.id = {int(campaign_id)}"
-            ),
-        )
+        try:
+            rows = list(
+                ga_service.search(
+                    customer_id=customer_id,
+                    query=(
+                        "SELECT campaign.asset_automation_settings FROM "
+                        "campaign "
+                        f"WHERE campaign.id = {int(campaign_id)}"
+                    ),
+                )
+            )
+        except GoogleAdsException as ex:
+            _raise_tool_error(ex)
         current: Dict[int, int] = {}
         for row in rows:
             for s in row.campaign.asset_automation_settings:
@@ -612,14 +810,17 @@ def campaign_rename(
     ga_service = utils.get_googleads_service("GoogleAdsService")
 
     old_name = None
-    for row in ga_service.search(
-        customer_id=customer_id,
-        query=(
-            "SELECT campaign.name FROM campaign "
-            f"WHERE campaign.id = {int(campaign_id)}"
-        ),
-    ):
-        old_name = row.campaign.name
+    try:
+        for row in ga_service.search(
+            customer_id=customer_id,
+            query=(
+                "SELECT campaign.name FROM campaign "
+                f"WHERE campaign.id = {int(campaign_id)}"
+            ),
+        ):
+            old_name = row.campaign.name
+    except GoogleAdsException as ex:
+        _raise_tool_error(ex)
     if old_name is None:
         raise ToolError(f"Campaign {campaign_id} not found in {customer_id}")
 
@@ -738,6 +939,263 @@ def campaign_budget_update(
     if confirm:
         details["updated_resource"] = response.results[0].resource_name
     return _preview_or_done(confirm, "campaign_budget_update", details)
+
+
+@mutate_mcp.tool(annotations=_WRITE_ANNOTATIONS)
+def campaign_budget_update_batch(
+    customer_id: str,
+    updates: List[Dict[str, Any]],
+    confirm: bool = False,
+) -> Dict[str, Any]:
+    """Changes the daily budget of SEVERAL campaigns in one request.
+
+    Use this instead of calling mutate_campaign_budget_update in a loop
+    whenever three or more campaigns need a new budget: one call, one
+    preview, one approval. For a single campaign use
+    mutate_campaign_budget_update.
+
+    updates is a list of objects, at most 100:
+    [{"campaign_id": "123", "new_daily_budget": 75.0}, ...]. Budgets are in
+    the account currency (75.0 = 75 EUR on a EUR account) and are converted
+    to micros automatically. Duplicate campaign_ids are rejected.
+
+    SHARED BUDGETS: the update happens on the budget, not on the campaign, so
+    a shared budget changes every campaign attached to it — each affected row
+    in the preview carries a warning. Two campaigns on the same shared budget
+    collapse into one operation when they request the same amount, and are
+    rejected when they request different amounts.
+
+    DRY-RUN vs APPLY: with confirm=false (default) every campaign id is
+    resolved first (unknown ids fail before anything is written) and the
+    batch is validated by Google Ads atomically (validate_only), so nothing
+    is changed. With confirm=true the batch is applied with
+    partial_failure=true, so some budgets can succeed while others fail — the
+    result reports requested/succeeded/failed counts plus a per-campaign
+    breakdown.
+
+    Args:
+        customer_id: The client account id (digits only, no hyphens).
+        updates: Up to 100 objects with "campaign_id" and a positive
+            "new_daily_budget" in account currency.
+        confirm: False = dry-run preview (default), True = apply changes.
+    """
+    customer_id = _clean_customer_id(customer_id)
+    _check_batch_size(updates, "updates")
+
+    requested: List[Dict[str, Any]] = []
+    seen: Dict[str, int] = {}
+    for index, entry in enumerate(updates):
+        if not isinstance(entry, dict):
+            raise ToolError(
+                f"updates[{index}] must be an object with campaign_id and "
+                "new_daily_budget"
+            )
+        campaign_id = str(entry.get("campaign_id", "")).strip()
+        if not campaign_id:
+            raise ToolError(f"updates[{index}] is missing campaign_id")
+        # isascii() as well as isdigit(): the latter also accepts non-ASCII
+        # digits, which gaql_id rejects — but with a message that no longer
+        # names the offending entry.
+        if not (campaign_id.isascii() and campaign_id.isdigit()):
+            raise ToolError(
+                f"updates[{index}]: campaign_id must be a numeric campaign "
+                f"id, got {entry.get('campaign_id')!r}"
+            )
+        campaign_id = utils.gaql_id(campaign_id)
+        raw_amount = entry.get("new_daily_budget")
+        if raw_amount is None:
+            raise ToolError(f"updates[{index}] is missing new_daily_budget")
+        # bool is an int subclass: True would silently become a 1.0 budget.
+        if isinstance(raw_amount, bool):
+            raise ToolError(
+                f"updates[{index}]: new_daily_budget must be a number, got "
+                f"{raw_amount!r}"
+            )
+        try:
+            amount = float(raw_amount)
+        except (TypeError, ValueError):
+            raise ToolError(
+                f"updates[{index}]: new_daily_budget must be a number, got "
+                f"{raw_amount!r}"
+            )
+        # isfinite rules out NaN and infinity, which pass a plain "> 0"
+        # check and then blow up inside _to_micros as a bare ValueError.
+        if not math.isfinite(amount) or amount <= 0:
+            raise ToolError(
+                f"updates[{index}]: new_daily_budget must be a positive "
+                f"number, got {raw_amount!r}"
+            )
+        if campaign_id in seen:
+            raise ToolError(
+                f"updates[{index}] repeats campaign_id {campaign_id} (first "
+                f"seen at updates[{seen[campaign_id]}]). Send one budget per "
+                "campaign."
+            )
+        seen[campaign_id] = index
+        requested.append({"campaign_id": campaign_id, "amount": amount})
+
+    client = utils.get_googleads_client()
+    ga_service = utils.get_googleads_service("GoogleAdsService")
+
+    ids_csv = ", ".join(item["campaign_id"] for item in requested)
+    query = (
+        "SELECT campaign.id, campaign.name, campaign.campaign_budget, "
+        "campaign_budget.explicitly_shared, campaign_budget.amount_micros "
+        f"FROM campaign WHERE campaign.id IN ({ids_csv})"
+    )
+    try:
+        rows = {
+            str(row.campaign.id): row
+            for row in ga_service.search(customer_id=customer_id, query=query)
+        }
+    except GoogleAdsException as ex:
+        _raise_tool_error(ex)
+
+    missing = [
+        item["campaign_id"]
+        for item in requested
+        if item["campaign_id"] not in rows
+    ]
+    if missing:
+        raise ToolError(
+            f"Campaigns not found in account {customer_id}: "
+            f"{', '.join(missing)}. Nothing was changed."
+        )
+
+    # One operation per BUDGET resource, not per campaign: two campaigns on
+    # one shared budget would otherwise send two operations against the same
+    # resource in a single request.
+    budgets: Dict[str, Dict[str, Any]] = {}
+    rows_out: List[Dict[str, Any]] = []
+    for item in requested:
+        campaign_id = item["campaign_id"]
+        row = rows[campaign_id]
+        budget_resource = str(row.campaign.campaign_budget)
+        new_micros = _to_micros(item["amount"])
+        is_shared = bool(row.campaign_budget.explicitly_shared)
+        group = budgets.get(budget_resource)
+        if group is None:
+            budgets[budget_resource] = {
+                "amount_micros": new_micros,
+                "campaign_ids": [campaign_id],
+            }
+        elif group["amount_micros"] != new_micros:
+            other = ", ".join(group["campaign_ids"])
+            raise ToolError(
+                f"Campaigns {other} and {campaign_id} share campaign budget "
+                f"{budget_resource}, but the request sets two different "
+                f"amounts ({group['amount_micros'] / _MICROS} and "
+                f"{item['amount']}). One budget can only hold one amount — "
+                "send a single amount for the shared budget, or move a "
+                "campaign onto its own budget first. Nothing was changed."
+            )
+        else:
+            group["campaign_ids"].append(campaign_id)
+        entry: Dict[str, Any] = {
+            "campaign_id": campaign_id,
+            "campaign_name": row.campaign.name,
+            "budget_resource": budget_resource,
+            "old_amount_micros": int(row.campaign_budget.amount_micros),
+            "new_amount_micros": new_micros,
+            "new_daily_budget": item["amount"],
+            "shared": is_shared,
+        }
+        if is_shared:
+            entry["warning"] = (
+                "shared budget - the change affects every campaign using it"
+            )
+        rows_out.append(entry)
+
+    budget_service = utils.get_googleads_service("CampaignBudgetService")
+    request = client.get_type("MutateCampaignBudgetsRequest")
+    request.customer_id = customer_id
+    # The API rejects validate_only together with partial_failure: the
+    # dry-run is atomic, the apply is per-operation.
+    request.validate_only = not confirm
+    request.partial_failure = bool(confirm)
+
+    operation_budgets = list(budgets)
+    for budget_resource in operation_budgets:
+        operation = client.get_type("CampaignBudgetOperation")
+        budget = operation.update
+        budget.resource_name = budget_resource
+        budget.amount_micros = budgets[budget_resource]["amount_micros"]
+        # Explicit leaf path: a value-derived mask cannot express "only the
+        # amount changed" reliably.
+        operation.update_mask.paths.append("amount_micros")
+        request.operations.append(operation)
+
+    try:
+        response = budget_service.mutate_campaign_budgets(request=request)
+    except GoogleAdsException as ex:
+        _raise_tool_error(ex)
+
+    details: Dict[str, Any] = {
+        "customer_id": customer_id,
+        "requested": len(requested),
+        "budget_operations": len(operation_budgets),
+        "budgets": rows_out,
+    }
+    collapsed = [
+        {
+            "budget_resource": budget_resource,
+            "campaign_ids": group["campaign_ids"],
+            "new_daily_budget": group["amount_micros"] / _MICROS,
+        }
+        for budget_resource, group in budgets.items()
+        if len(group["campaign_ids"]) > 1
+    ]
+    if collapsed:
+        details["shared_budget_collapsed"] = collapsed
+    if any(entry["shared"] for entry in rows_out):
+        details["warning"] = (
+            "Some of these budgets are SHARED: changing one affects every "
+            "campaign attached to it, including campaigns not listed here."
+        )
+
+    if confirm:
+        failures = _partial_failure_errors(client, response)
+        results = list(response.results)
+        succeeded: List[Dict[str, Any]] = []
+        failed: List[Dict[str, Any]] = []
+        for index, budget_resource in enumerate(operation_budgets):
+            group = budgets[budget_resource]
+            if index in failures:
+                failed.extend(
+                    {
+                        "campaign_id": campaign_id,
+                        "budget_resource": budget_resource,
+                        "error": failures[index],
+                    }
+                    for campaign_id in group["campaign_ids"]
+                )
+                continue
+            resource_name = (
+                results[index].resource_name if index < len(results) else ""
+            )
+            if not resource_name:
+                failed.extend(
+                    {
+                        "campaign_id": campaign_id,
+                        "budget_resource": budget_resource,
+                        "error": _NO_RESULT_ERROR,
+                    }
+                    for campaign_id in group["campaign_ids"]
+                )
+                continue
+            succeeded.extend(
+                {
+                    "campaign_id": campaign_id,
+                    "budget_resource": budget_resource,
+                    "resource_name": resource_name,
+                }
+                for campaign_id in group["campaign_ids"]
+            )
+        details["succeeded"] = len(succeeded)
+        details["failed"] = len(failed)
+        details["succeeded_campaigns"] = succeeded
+        details["failed_campaigns"] = failed
+    return _preview_or_done(confirm, "campaign_budget_update_batch", details)
 
 
 @mutate_mcp.tool(annotations=_WRITE_ANNOTATIONS)

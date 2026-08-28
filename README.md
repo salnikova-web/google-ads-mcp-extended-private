@@ -54,7 +54,7 @@ namespaces:
 
 #### Opt-in profiles
 
-The default configuration enables all 16 namespaces (98 tools). If you do not
+The default configuration enables all 16 namespaces (100 tools). If you do not
 need the full surface — for reporting-only use, or to reduce the tool schemas
 sent to your LLM on every request — save one of the profiles below to a file
 and point `GOOGLE_ADS_MCP_TOOLS_CONFIG` at it.

@@ -29,6 +29,8 @@ Python MCP-сервер `google-ads-mcp` (FastMCP) для Google Ads API:
   **з-поза директорії репо** — зсередини cwd дає хибний позитив.
 - `claude_desktop_config.json` містить секрети відкритим текстом
   (developer token) — грепати вузько, не тягнути в контекст зайвого.
+- Реліз локально: `nox -s deploy` — гейт (чисте дерево, main, black --check,
+  тести, pipx install, звірка commit_id) + нагадування про ⌘Q.
 
 ## Команди
 
@@ -110,6 +112,12 @@ python -m unittest tests.tools.mutate_test.КЛАС.тест   # один тес
   `backup/pre-neutralize` несе стару ідентичність авторів.
 - Реліз: branch → PR → merge → tag `vX.Y.Z` → GitHub release → пін
   клієнтського конфігу на `@vX.Y.Z` (не floating main).
+- Кожен реліз-PR бампає version у pyproject.toml до тега vX.Y.Z
+  (інстальована версія має збігатися з тегом).
+- Перед будь-якою зміною видимості репо/публічним форком: `git
+  ls-files CLAUDE.md .claude/` у published tree має бути порожнім; також
+  перевірити, що `noxfile.py` не містить машинно-специфічних шляхів (або
+  занейтралізувати `DEPLOY_SOURCE_REPO` через `GOOGLE_ADS_MCP_DEPLOY_REPO`).
 
 ## Відомі хвости (не «лагодити» мимохідь, окремі задачі)
 
