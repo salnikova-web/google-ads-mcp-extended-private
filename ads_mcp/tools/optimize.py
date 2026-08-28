@@ -53,7 +53,10 @@ def recommendations_list(
     query = (
         "SELECT recommendation.resource_name, recommendation.type, "
         "recommendation.dismissed, recommendation.campaign "
-        "FROM recommendation ORDER BY recommendation.resource_name "
+        # resource_name is PROHIBITED_FIELD_IN_ORDER_BY_CLAUSE on the live
+        # API (verified 28.08.2026, request kJOXkvLAh33RGqxkZUVSMg);
+        # recommendation.type is the documented sortable fallback.
+        "FROM recommendation ORDER BY recommendation.type "
         f"LIMIT {cap + 1}"
     )
     try:
