@@ -146,6 +146,9 @@ def get_resource_metadata(
     S=selectable, F=filterable, O=sortable, always in that order and a
     missing letter meaning false. So "SFO" is usable anywhere, "SF" cannot
     be used in ORDER BY, and "F" is filter-only and must NOT be SELECTed.
+    The "metrics" and "segments" keys are ABSENT (not empty) when their
+    lookup failed — an empty map would read as "this resource has none",
+    so read "warnings" instead of assuming.
     NEVER SILENT: when "truncated" is true the lists are INCOMPLETE and
     "warnings" says why. A field missing from a truncated answer is NOT
     proof that the field does not exist — say so to the user instead of
@@ -239,7 +242,15 @@ def get_resource_metadata(
         "resource": resource_name,
         "flags": _FLAG_LEGEND,
     }
-    result.update(_grouped(fields))
+    groups = _grouped(fields)
+    if enrichment_failed:
+        # An empty map is indistinguishable from "this resource genuinely
+        # has no metrics", which is the false belief this tool exists to
+        # prevent. The keys are dropped entirely so a reader that ignores
+        # "truncated" cannot mistake a failed lookup for an answer.
+        groups.pop("metrics")
+        groups.pop("segments")
+    result.update(groups)
     result["truncated"] = limit_cut or enrichment_failed
     if warnings:
         result["warnings"] = warnings

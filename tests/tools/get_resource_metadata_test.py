@@ -110,6 +110,10 @@ class TestGetResourceMetadata(MetadataToolTestCase):
             result["attributes"],
             {"campaign.id": "SFO", "campaign.name": "SO"},
         )
+        # Present on the success path — their absence means a failed
+        # lookup, so they may not go missing when the lookup worked.
+        self.assertIn("metrics", result)
+        self.assertIn("segments", result)
         self.assertEqual(result["metrics"], {"metrics.clicks": "SF"})
         self.assertEqual(result["segments"], {"segments.date": "SFO"})
         self.assertIs(result["truncated"], False)
@@ -132,6 +136,20 @@ class TestGetResourceMetadata(MetadataToolTestCase):
         result = get_resource_metadata.get_resource_metadata("campaign")
 
         self.assertEqual(result["attributes"], {"campaign.filter_only": "F"})
+
+    def test_a_successful_but_empty_lookup_keeps_the_keys(self):
+        """Empty is an ANSWER; only a failed lookup drops the keys."""
+        self.service.search_google_ads_fields.side_effect = [
+            [FakeField("campaign.id", selectable=True)],
+            [],
+        ]
+
+        result = get_resource_metadata.get_resource_metadata("campaign")
+
+        self.assertEqual(result["metrics"], {})
+        self.assertEqual(result["segments"], {})
+        self.assertIs(result["truncated"], False)
+        self.assertNotIn("warnings", result)
 
     def test_flags_merge_when_a_name_appears_in_both_queries(self):
         self.service.search_google_ads_fields.side_effect = [
@@ -167,8 +185,12 @@ class TestGetResourceMetadata(MetadataToolTestCase):
 
         # The attributes still come back...
         self.assertEqual(result["attributes"], {"campaign.id": "S"})
-        self.assertEqual(result["metrics"], {})
-        # ...but the answer is not passed off as complete.
+        # ...the two keys whose lookup failed are ABSENT, never empty: an
+        # empty map reads as "this resource has no metrics", which is the
+        # false belief this whole change exists to prevent.
+        self.assertNotIn("metrics", result)
+        self.assertNotIn("segments", result)
+        # ...and the answer is not passed off as complete.
         self.assertIs(result["truncated"], True)
         self.assertEqual(len(result["warnings"]), 1)
         warning = result["warnings"][0]
