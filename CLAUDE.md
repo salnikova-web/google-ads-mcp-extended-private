@@ -1,7 +1,7 @@
 # google-ads-mcp-extended
 
 Python MCP-сервер `google-ads-mcp` (FastMCP) для Google Ads API:
-16 read-only + 82 write-інструменти в 16 неймспейсах. Write-документація —
+17 read-only + 84 write-інструменти (101) в 16 неймспейсах. Write-документація —
 [README-EXTENDED.md](README-EXTENDED.md).
 
 ## КРИТИЧНЕ: ланцюг доставки
@@ -44,8 +44,10 @@ python -m unittest tests.tools.mutate_test.КЛАС.тест   # один тес
   може тихо запустити НУЛЬ тестів. Робочий обхід:
   `.venv/bin/coverage run -m unittest discover -s tests -p "*_test.py"`.
 - Патерн тестових файлів — `*_test.py`, НЕ `test_*.py`. Файл із
-  неправильним іменем мовчки не запускається (приклад:
-  `tests/smoke/test_token_usage.py` — ніколи не бігав).
+  неправильним іменем мовчки не запускається (приклад: історичний
+  `tests/smoke/test_token_usage.py` ніколи не бігав під цим іменем —
+  перейменований на `tests/smoke/token_usage_check.py`, яке й лишається
+  сьогодні).
 - `tests/smoke/` не має `__init__.py` → `unittest discover` мовчки
   пропускає ВЕСЬ смоук-пакет (виявлено 28.08: повний прогін «зелений»
   при зламаних goldens). Смоук ганяти окремо:
@@ -61,10 +63,14 @@ python -m unittest tests.tools.mutate_test.КЛАС.тест   # один тес
   `utils.clear_googleads_cache()`.
 - Смоук-тести діфляться з `tests/smoke/golden_tools_list.json`. Будь-яка
   зміна імені/опису/схеми інструмента ламає їх, поки не перегенеровано:
-  `python tests/smoke/generate_golden.py` — запускати ОДИН раз, останнім,
-  після всіх правок схем (import google.genai у скрипті guarded; env
-  `GOOGLE_ADS_MCP_TOOLS_CONFIG` smoke_utils пінить сам — недетермінізм
-  goldens закритий).
+  `python -m tests.smoke.generate_golden` (або `nox -s update_smoke_golden`)
+  — запускати ОДИН раз, останнім, після всіх правок схем (import
+  google.genai у скрипті guarded; env `GOOGLE_ADS_MCP_TOOLS_CONFIG`
+  smoke_utils пінить сам — недетермінізм goldens закритий). Скриптовий
+  шлях `python tests/smoke/generate_golden.py` НЕ працює — падає
+  `ModuleNotFoundError: No module named 'tests.smoke'` (`from tests.smoke
+  import smoke_utils` вимагає пакетного імпорту, не шляху до файлу;
+  перевірено).
 - `coordinator.py` монтує інструменти при імпорті — тести патчать
   `ToolsConfig.load` і кличуть `initialize_and_mount_tools` на свіжому
   FastMCP.
@@ -73,10 +79,16 @@ python -m unittest tests.tools.mutate_test.КЛАС.тест   # один тес
 
 ## Write-безпека і правила правок
 
-- `_preview_or_done` в `ads_mcp/tools/mutate.py` — імпортується 12 write-
-  модулями. П'ять інструментів не мають віддаленої валідації в dry-run:
-  `optimize_recommendation_apply/dismiss` (запити БЕЗ поля `validate_only` —
-  не «лагодити»), `experiments_experiment_create/end/promote`.
+- `_preview_or_done` визначено в `ads_mcp/tools/_write_common.py`
+  (`mutate.py` ре-експортує для зворотної сумісності) — імпортується
+  12 іншими write-модулями + mutate.py, 13 разом. П'ять інструментів не
+  мають віддаленої валідації в dry-run: `optimize_recommendation_apply/
+  dismiss` (запити БЕЗ поля `validate_only` — не «лагодити»),
+  `experiments_experiment_create/end/promote`.
+- Назви параметрів у write-інструментах: update-інструменти приймають
+  `new_name` (`mutate_ad_group_update`, `pmax_asset_group_update`);
+  `mutate_campaign_rename` навмисно лишає параметр `name` — стабільність
+  схеми важливіша за однаковість найменувань.
 - `mutate_keywords_add`: dry-run атомарний, apply — `partial_failure=True`.
   Незводимі (API відкидає їх разом). Задокументовано, не чіпати.
 - `field_mask` губить `""`, `0`, `False` → paths будувати тільки всередині
@@ -85,8 +97,11 @@ python -m unittest tests.tools.mutate_test.КЛАС.тест   # один тес
   поля, які користувач не передавав.
 - `_WRITE_ANNOTATIONS` та спільні write-хелпери централізовано в
   `ads_mcp/tools/_write_common.py` (mutate.py ре-експортує) — правка
-  константи зачіпає ВСІ ~98 write-інструментів одразу; дубль-копії ловить
-  інваріант-тест у write_invariants_test.py.
+  константи напряму зачіпає 74 з 84 write-інструментів (решта 10 мають
+  власні inline `ToolAnnotations`, усі 10 з `destructiveHint=True` для
+  незворотних дій — REMOVED-статуси, видалення keywords/criteria/asset,
+  experiment end тощо); дубль-копії ловить інваріант-тест у
+  write_invariants_test.py.
 - `search.py` — навмисний raw read-only passthrough GAQL, НЕ вразливість.
   Решта write-шляхів екранують через `gaql_str()`/`gaql_id()`.
 - Кеш клієнта: ніколи argless `lru_cache` (у hosted-режимі віддасть виклик
@@ -110,8 +125,10 @@ python -m unittest tests.tools.mutate_test.КЛАС.тест   # один тес
   contributors". `[build-system]` у pyproject відсутній навмисно.
 - Проєкт нейтральний: без згадок компаній/розробників, плейсхолдери
   `YOUR_ORG`/`example.com`, без AI-трейлерів у комітах.
-- Пуш ТІЛЬКИ `main`, ніколи `--all`/`--mirror` — локальна гілка
-  `backup/pre-neutralize` несе стару ідентичність авторів.
+- Пуш ТІЛЬКИ `main`, ніколи `--all`/`--mirror` — історичні локальні гілки
+  можуть нести стару ідентичність авторів (приклад `backup/pre-neutralize`
+  вже видалено, але патерн лишається): пушити тільки те, що явно
+  призначено для пушу.
 - Реліз: branch → PR → merge → tag `vX.Y.Z` → GitHub release → пін
   клієнтського конфігу на `@vX.Y.Z` (не floating main).
 - Кожен реліз-PR бампає version у pyproject.toml до тега vX.Y.Z

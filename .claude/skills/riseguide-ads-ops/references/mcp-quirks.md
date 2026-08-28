@@ -12,11 +12,39 @@
 
 ## Списки
 
-- `mutate_list_campaigns` мовчки обрізає на ліміті. Кількість рядків =
-  ліміт → результат неповний. Для підрахунків: `search_search` (GAQL),
-  `fields=["campaign.id"]`, високий ліміт.
-- Ніколи не робити exists-check перед записом по обрізаному списку —
-  рядок за лімітом → хибний висновок «не існує» → дублікат.
+- Усі 12 list-style read-інструментів (`mutate_list_campaigns`,
+  `demandgen_list_assets`, `optimize_recommendations_list`,
+  `optimize_change_history`, `mutate_keywords_ideas`,
+  `extensions_list_campaign_assets`, `targeting_list_criteria`,
+  `negatives_list_shared_sets`, `tracking_list_tracking`,
+  `experiments_experiments_list`, `pmax_list_asset_groups`,
+  `audiences_list_audiences`) повертають конверт `{items|<ключ>,
+  returned, truncated}` і додають рядок `warning`, коли truncated=true —
+  мовчазного обрізання більше немає. Два винятки з форми конверта:
+  `tracking_list_tracking` не має `returned` (`{account, campaigns,
+  truncated, warning?}`), `audiences_list_audiences` має `truncated` не
+  булевим, а мапою по трьох секціях (`{audiences, user_lists,
+  custom_segments}`) — `warning` в обох так само з'являється лише коли
+  щось реально обрізано.
+- Truncated ≠ повний список. Відсутність рядка в обрізаному списку ≠
+  «не існує» — рядок міг лишитись за лімітом. При truncated: підняти
+  `limit` або звузити фільтр, і переказати `warning` користувачці перед
+  тим, як робити висновок про відсутність (сортування за спендом —
+  дивись «Загальні максими» нижче).
+
+## Батч-мутації (≥3 кампаній)
+
+- Для ≥3 кампаній — не по одній: `mutate_campaign_update_status_batch`
+  (лише ENABLED/PAUSED; REMOVED незворотний, тому batch його відмовляє —
+  видаляти по одній через `mutate_campaign_update_status`) і
+  `mutate_campaign_budget_update_batch` (спільні бюджети групуються в
+  одну операцію на бюджет; кампанії на одному спільному бюджеті з РІЗНИМИ
+  сумами в одному виклику падають ДО будь-якого запису — нічого не
+  міняється).
+- Обидва: dry-run (`confirm=false`) — один атомарний запит, будь-яка
+  погана id валить увесь прев'ю; apply (`confirm=true`) —
+  `partial_failure=true` з результатом по кожній кампанії окремо
+  (`requested`/`succeeded`/`failed`).
 
 ## Помилки: рецепти
 
@@ -26,15 +54,28 @@
   перевірити креденшл. Не ретраїти (23.07: 3 ретраї, 7.8 хв, 0 даних).
   Повторюється після reconnect → перевірити тип креденшла (зараз service
   account — для Ads API потребує domain-wide delegation, відкрите питання).
+  Сервер v0.3.0 сам перекладає це в понятну відповідь (middleware): агент
+  отримує «NOT retryable — re-authenticate», а не сирий traceback —
+  порада «не ретраїти, перепідключити конектор» лишається чинною, просто
+  вже без потреби розбирати трасу самостійно.
 - **503 `No route to host … ipv6:…`** — локальна IPv6-проблема (10 випадків
   у логах), не API і не запит; лікується на рівні системи.
 - **Помилки GAQL** приходять як `Request ID: …` + текст — цей ID для
-  підтримки Google.
+  підтримки Google. `UNRECOGNIZED_FIELD`/`PROHIBITED_FIELD` тепер несуть
+  готову підказку: звірити поле через `metadata_get_resource_metadata`;
+  той інструмент сам відсилає далі до нового `metadata_get_field_details`
+  (тип поля, enum-значення, з чим поле можна селектити) — не гадати назву
+  вручну.
 
 ## GAQL-дисципліна
 
-- `search_search` НЕ має дефолтного ліміту, всі рядки матеріалізуються →
-  завжди передавати `limit`.
+- `search_search`: дефолтний `limit=1000` (діє, якщо `limit` не передано
+  взагалі). Явний `limit=null` — повний експорт без обрізання. При
+  обрізанні (дефолтом чи явним лімітом) відповідь несе чесний `warning` і
+  `total: null` (розмір усього набору невідомий, поки він не вичерпаний).
+  Для `change_event` додатково можливий `api_row_cap_hit: true` — API сама
+  не дає читати більше 10000 рядків за запит, і в такому разі `total`
+  теж лишається null (стеля, а не вичерпання).
 - Дати тільки `YYYY-MM-DD`, діапазон скінченний з обох боків;
   `LAST_3_DAYS` не існує. `change_event` вимагає `LIMIT <= 10000`.
 - `customer_id` — цифри без дефісів.
@@ -70,6 +111,11 @@ unpinned `pipx run` — не повертатись до нього).
 виконуються прямо з файлів кешу, чистка під ними або впреться в
 `.lock`-timeout, або висмикне файли з-під живого процесу.
 
+`nox -s deploy` (гейт релізу) інколи відмовляє на кроці `pipx install`:
+«virtual environment already exists … not created in this session»
+(pipx на uv-бекенді). Перезапустити як `UV_VENV_CLEAR=1 nox -s deploy` —
+перевірено 28.08.2026 на деплої v0.3.0.
+
 **Цілісність fastmcp під питанням (виявлено 28.08.2026):** у всіх venv цієї
 машини (робочий, dev, pipx) fastmcp 3.4.7 має обрізаний dist-info RECORD
 (5 рядків замість переліку файлів), а свіже `pip download --no-cache-dir`
@@ -79,7 +125,8 @@ pypi.org незалежним каналом (браузером), не дові
 
 ## Клонування кампаній
 
-Повний чек-лист (11 кроків, 4 шари) — `README-EXTENDED.md:349–440` у репо.
+Повний чек-лист (11 кроків, 4 шари) — `README-EXTENDED.md:430–486` у репо
+(секція «Campaign cloning checklist»).
 Ключове: **не відтворюються** shared budgets, portfolio bid strategies,
 pinned headlines. Retail PMax: `merchant_id` незмінний після створення;
 `listing_source=SHOPPING` на кожному вузлі; кожен SUBDIVISION потребує
