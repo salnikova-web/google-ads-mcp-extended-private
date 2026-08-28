@@ -235,6 +235,24 @@ Add the server to your MCP client's configuration. The `mcpServers` block
 format below is the same across MCP clients; refer to your client's
 documentation for where its configuration file lives.
 
+Options 2 and 3 below run the server as a local process that your MCP
+client launches directly. Install it once first (pipx installs a real
+binary — no `pipx run` wrapper needed, so the client starts the server
+immediately instead of resolving a package spec on every launch):
+
+```shell
+pipx install 'google-ads-mcp @ git+https://github.com/YOUR_ORG/google-ads-mcp-extended.git@vX.Y.Z'
+```
+
+Replace `YOUR_ORG` with the repository you are installing from and
+`vX.Y.Z` with the release tag you want to pin to (see
+[Releases](https://github.com/YOUR_ORG/google-ads-mcp-extended/releases)).
+This installs the `google-ads-mcp` entry point into pipx's bin directory
+(`~/.local/bin` by default — run `pipx list` to confirm the exact path).
+To move to a newer release, re-run the same command with `--force` and
+the new tag, then fully restart your MCP client — it keeps the previous
+server in memory otherwise.
+
 - Option 1: Using FastMCP OAuth Proxy (Streamable HTTP)
 
   You can run the server as a separate process and configure your MCP client to connect to the SSE endpoint (e.g., `http://localhost:8080/mcp`).
@@ -246,7 +264,6 @@ documentation for where its configuration file lives.
         "google-ads-mcp": {
           "httpUrl":"http://localhost:8080/mcp",
           "env": {
-            "GOOGLE_PROJECT_ID": "YOUR_PROJECT_ID",
             "GOOGLE_ADS_DEVELOPER_TOKEN": "YOUR_DEVELOPER_TOKEN"                        
           }
         }
@@ -257,7 +274,8 @@ documentation for where its configuration file lives.
 - Option 2: the Application Default Credentials method
 
     Replace `PATH_TO_CREDENTIALS_JSON` with the path you copied in the previous
-    step.
+    step, and `PATH_TO_GOOGLE_ADS_MCP_BIN` with the binary `pipx install`
+    just placed (see above; typically `~/.local/bin/google-ads-mcp`).
 
     We also recommend that you add a `GOOGLE_CLOUD_PROJECT` attribute to the
     `env` object. Replace `YOUR_PROJECT_ID` in the following example with the
@@ -268,16 +286,10 @@ documentation for where its configuration file lives.
     {
       "mcpServers": {
         "google-ads-mcp": {
-          "command": "pipx",
-          "args": [
-            "run",
-            "--spec",
-            "git+https://github.com/YOUR_ORG/google-ads-mcp-extended.git",
-            "google-ads-mcp"
-          ],
+          "command": "PATH_TO_GOOGLE_ADS_MCP_BIN",
           "env": {
             "GOOGLE_APPLICATION_CREDENTIALS": "PATH_TO_CREDENTIALS_JSON",
-            "GOOGLE_PROJECT_ID": "YOUR_PROJECT_ID",
+            "GOOGLE_CLOUD_PROJECT": "YOUR_PROJECT_ID",
             "GOOGLE_ADS_DEVELOPER_TOKEN": "YOUR_DEVELOPER_TOKEN"
           }
         }
@@ -291,15 +303,9 @@ documentation for where its configuration file lives.
     {
       "mcpServers": {
         "google-ads-mcp": {
-          "command": "pipx",
-          "args": [
-            "run",
-            "--spec",
-            "git+https://github.com/YOUR_ORG/google-ads-mcp-extended.git",
-            "google-ads-mcp"
-          ],
+          "command": "PATH_TO_GOOGLE_ADS_MCP_BIN",
           "env": {
-            "GOOGLE_PROJECT_ID": "YOUR_PROJECT_ID",
+            "GOOGLE_CLOUD_PROJECT": "YOUR_PROJECT_ID",
             "GOOGLE_ADS_DEVELOPER_TOKEN": "YOUR_DEVELOPER_TOKEN"
           }
         }
@@ -320,16 +326,10 @@ The final file will look like this:
   {
     "mcpServers": {
       "google-ads-mcp": {
-        "command": "pipx",
-        "args": [
-          "run",
-          "--spec",
-          "git+https://github.com/YOUR_ORG/google-ads-mcp-extended.git",
-          "google-ads-mcp"
-        ],
+        "command": "PATH_TO_GOOGLE_ADS_MCP_BIN",
         "env": {
           "GOOGLE_APPLICATION_CREDENTIALS": "PATH_TO_CREDENTIALS_JSON",
-          "GOOGLE_PROJECT_ID": "YOUR_PROJECT_ID",
+          "GOOGLE_CLOUD_PROJECT": "YOUR_PROJECT_ID",
           "GOOGLE_ADS_DEVELOPER_TOKEN": "YOUR_DEVELOPER_TOKEN",
           "GOOGLE_ADS_LOGIN_CUSTOMER_ID": "YOUR_MANAGER_CUSTOMER_ID"
         }
@@ -342,9 +342,13 @@ The final file will look like this:
 
 The `mcpServers` block format is the same across MCP clients. Add the
 configuration shown above to your client's MCP settings file, and replace
-`YOUR_ORG` in the `--spec` argument with the repository you installed this
-server from. If you run the server from a local checkout instead, point
-`command` at the `google-ads-mcp` entry point in your virtual environment.
+`PATH_TO_GOOGLE_ADS_MCP_BIN` with the binary the one-time `pipx install`
+above placed (see "Configure your MCP client"). If you run the server
+from a local checkout instead, point `command` at the `google-ads-mcp`
+entry point in that checkout's virtual environment (e.g.
+`PATH_TO_REPO/.venv/bin/google-ads-mcp`) — see
+[CONTRIBUTING.md](CONTRIBUTING.md) for testing against a local checkout
+or a branch.
 
 ## Deployment to Google Cloud Platform
 
@@ -410,10 +414,14 @@ the next step fails to start.
 
 Environment variables used by the server:
 
-- `GOOGLE_PROJECT_ID`: Your Google Cloud project ID.
 - `GOOGLE_ADS_MCP_OAUTH_CLIENT_ID`: The OAuth Client ID you want the MCP server to use.
 - `GOOGLE_ADS_MCP_BASE_URL`: The base URL where your MCP server is accessible: this will be automatically assigned by Google Cloud Run after your first deployment. You can update the environment variables after deployment.
 - `GOOGLE_ADS_DEVELOPER_TOKEN` and `GOOGLE_ADS_MCP_OAUTH_CLIENT_SECRET`: supplied from Secret Manager via `--set-secrets` (see Step 2).
+
+`--image` and `--project`/`gcloud config set project` already tell Cloud
+Run which project to deploy into — the server itself does not read a
+project id from its environment, so none needs to be passed via
+`--set-env-vars`.
 
 ```shell
 gcloud run deploy google-ads-mcp \
@@ -421,7 +429,7 @@ gcloud run deploy google-ads-mcp \
   --platform managed \
   --region us-central1 \
   --allow-unauthenticated \
-  --set-env-vars="GOOGLE_PROJECT_ID=YOUR_PROJECT_ID,GOOGLE_ADS_MCP_OAUTH_CLIENT_ID=YOUR_CLIENT_ID,GOOGLE_ADS_MCP_BASE_URL=YOUR_BASE_URL" \
+  --set-env-vars="GOOGLE_ADS_MCP_OAUTH_CLIENT_ID=YOUR_CLIENT_ID,GOOGLE_ADS_MCP_BASE_URL=YOUR_BASE_URL" \
   --set-secrets="GOOGLE_ADS_DEVELOPER_TOKEN=google-ads-developer-token:latest,GOOGLE_ADS_MCP_OAUTH_CLIENT_SECRET=google-ads-mcp-oauth-client-secret:latest"
 ```
 

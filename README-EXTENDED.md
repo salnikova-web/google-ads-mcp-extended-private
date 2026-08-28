@@ -337,29 +337,43 @@ parameter as every other write tool (see "Safety model" above).
      --scopes="https://www.googleapis.com/auth/adwords,https://www.googleapis.com/auth/cloud-platform"
    ```
 
-3. Add a block to your MCP client configuration (inside `mcpServers`):
+3. Install the server (one time; re-run to update — see step 5):
+
+   ```shell
+   pipx install 'google-ads-mcp @ git+https://github.com/YOUR_ORG/google-ads-mcp-extended.git@vX.Y.Z'
+   ```
+
+   Replace `YOUR_ORG` with the repository and `vX.Y.Z` with the release
+   tag you want to pin to. This installs the `google-ads-mcp` entry point
+   into pipx's bin directory (`~/.local/bin` by default — run `pipx list`
+   to confirm the exact path).
+
+4. Add a block to your MCP client configuration (inside `mcpServers`):
 
    ```json
    "google-ads": {
-     "command": "PATH_TO_PYTHON3",
-     "args": [
-       "-m", "pipx", "run", "--no-cache",
-       "--spec", "git+https://github.com/YOUR_ORG/google-ads-mcp-extended.git",
-       "google-ads-mcp"
-     ],
+     "command": "/Users/USERNAME/.local/bin/google-ads-mcp",
      "env": {
        "GOOGLE_APPLICATION_CREDENTIALS": "/Users/USERNAME/.config/gcloud/application_default_credentials.json",
-       "GOOGLE_PROJECT_ID": "YOUR_GCP_PROJECT_ID",
+       "GOOGLE_CLOUD_PROJECT": "YOUR_GCP_PROJECT_ID",
        "GOOGLE_ADS_DEVELOPER_TOKEN": "YOUR_DEVELOPER_TOKEN",
        "GOOGLE_ADS_LOGIN_CUSTOMER_ID": "YOUR_MANAGER_CUSTOMER_ID"
      }
    }
    ```
 
-   `PATH_TO_PYTHON3` is the output of `which python3`. For a local test
-   without GitHub, replace the `--spec` value with the path to this folder.
+   `command` is the binary `pipx install` just placed — confirm the exact
+   path with `pipx list` if you customized pipx's install location. For a
+   local checkout instead of an installed release, point `command` at the
+   `google-ads-mcp` entry point inside that checkout's virtual environment
+   instead (see [CONTRIBUTING.md](CONTRIBUTING.md) for testing against a
+   local checkout or a branch).
 
-4. Fully restart the MCP client (not just the window).
+5. To move to a newer release, re-run the install command from step 3 with
+   `--force` and the new tag.
+
+6. Fully restart the MCP client (not just the window) — it keeps the
+   previous server in memory otherwise.
 
 ## Limitations
 
@@ -396,7 +410,10 @@ Notable changes compared to earlier revisions of these tools:
   results carry a `"truncated"` flag; list-shaped ones return a wrapper dict
   with the item list (key `"items"`, or `"asset_groups"` /
   `"experiments"` for the PMax and experiments listings) plus `"returned"`
-  and `"truncated"`. An entry missing
+  and `"truncated"`. Whenever `"truncated"` is true the result also carries
+  a `"warning"` string spelling out what was cut — the key is present only
+  when the list was actually truncated, so its presence alone is the
+  signal. An entry missing
   from a truncated listing means "not listed", not "does not exist" — raise
   the `limit` or narrow the query before concluding something is absent.
 - **An empty `namespaces:` block enables nothing.** In `tools_config.yaml`,
