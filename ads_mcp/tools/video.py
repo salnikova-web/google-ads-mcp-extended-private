@@ -29,20 +29,19 @@ from typing import Annotated, Any, Dict, List, Optional
 
 from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
-from mcp.types import ToolAnnotations
 from pydantic import Field
 from google.ads.googleads.errors import GoogleAdsException
 
 import ads_mcp.utils as utils
-from ads_mcp.tools.mutate import (
+from ads_mcp.tools._write_common import (
+    _WRITE_ANNOTATIONS as _WRITE,
     _clean_customer_id,
     _preview_or_done,
     _raise_tool_error,
+    _text_assets,
 )
 
 video_mcp = FastMCP("video")
-
-_WRITE = ToolAnnotations(readOnlyHint=False, destructiveHint=False)
 
 # Schema-only aliases: advertise the accepted values in tools/list via
 # json_schema_extra while runtime validation stays the existing lax
@@ -59,15 +58,6 @@ _BIDDING_ENUM = Annotated[
         }
     ),
 ]
-
-
-def _text_assets(client, texts: List[str]):
-    out = []
-    for t in texts:
-        a = client.get_type("AdTextAsset")
-        a.text = t
-        out.append(a)
-    return out
 
 
 @video_mcp.tool(annotations=_WRITE)

@@ -3,3 +3,5 @@ include ads_mcp/*.json
 include ads_mcp/*.txt
 #include the bundled default tools configuration
 include ads_mcp/*.yaml
+#include bundled skill guides (e.g. account-performance-diagnostics)
+recursive-include ads_mcp/skills *.md

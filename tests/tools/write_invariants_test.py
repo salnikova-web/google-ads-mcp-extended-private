@@ -10,9 +10,11 @@ the public ``ads_mcp.utils`` seams; the private ``_get_googleads_client``
 is never patched, so no MagicMock can leak into the memoized cache.
 """
 
+import ast
 import asyncio
 import importlib
 import inspect
+import pathlib
 import pkgutil
 import unittest
 from unittest.mock import MagicMock, patch
@@ -22,9 +24,13 @@ from fastmcp.exceptions import ToolError
 
 import ads_mcp.tools as tools_pkg
 import ads_mcp.utils as utils
+from ads_mcp.tools import _write_common
 from ads_mcp.tools import audiences, demand_gen, display, extensions
 from ads_mcp.tools import mutate, negatives, optimize, pmax
 from ads_mcp.tools import shopping, targeting, tracking, video
+
+# Imported through mutate on purpose: the re-export is what keeps every
+# `from ads_mcp.tools.mutate import _preview_or_done` in the wild working.
 from ads_mcp.tools.mutate import _preview_or_done
 
 # Imported as a module, not `from ... import TestNoApiDryRuns`: a TestCase
@@ -173,6 +179,17 @@ class TestValidateOnlySamples(unittest.TestCase):
             ("1234567890", "222"),
             {"target_cpa": 5.0},
         ),
+        # One of the two demand_gen tools whose action string was wrong
+        # (bare name, no namespace prefix) until it was fixed; sampled so
+        # the action-string check below actually covers it. Its sibling
+        # asset_upload_image takes the same path but has to fetch and
+        # read image bytes first, which is a mock this file does not
+        # otherwise need.
+        (
+            demand_gen.asset_create_youtube_video,
+            ("1234567890", "Promo video", "dQw4w9WgXcQ"),
+            {},
+        ),
         (pmax.asset_group_update, ("1234567890", "333"), {"new_name": "New"}),
         (
             audiences.create,
@@ -278,8 +295,17 @@ class TestValidateOnlySamples(unittest.TestCase):
         Reuses the SAMPLES plumbing above rather than adding new mocking:
         every dry-run result already carries an "action" key straight from
         _preview_or_done, so no source scan is needed to check it.
+
+        The no-API dry-runs are checked here too. Their endpoints have no
+        validate_only field, so they cannot join SAMPLES (their dry-run
+        sends nothing at all — that is what mutate_test.TestNoApiDryRuns
+        asserts), but their action strings are exactly as wrong-able, and
+        experiments is a whole namespace that would otherwise go
+        unchecked. Nothing is sent on a dry-run, so this needs no mocks
+        beyond the ones setUp already installs.
         """
-        for fn, args, kwargs in self.SAMPLES:
+        entries = list(self.SAMPLES) + list(mutate_test.TestNoApiDryRuns.CALLS)
+        for fn, args, kwargs in entries:
             with self.subTest(tool=fn.__name__):
                 self.service.reset_mock()
                 result = fn(*args, **kwargs)
@@ -344,6 +370,101 @@ class TestBehavioralSampleCoverage(unittest.TestCase):
                     f"{fn.__module__}.{fn.__name__} is sampled as a write "
                     "tool but is not mounted as one",
                 )
+
+
+class TestWriteCommonIsTheOneCopy(unittest.TestCase):
+    """The shared write plumbing lives in exactly one module.
+
+    ``_write_common.py`` was extracted from thirteen write modules that had
+    each grown their own copy of these helpers (and of the write
+    annotations), so a fix to one copy left the other twelve wrong. Both
+    halves of that are pinned: the helpers are defined once, and the module
+    holding them stays invisible to the coordinator's namespace discovery.
+    """
+
+    SHARED_NAMES = (
+        "_WRITE_ANNOTATIONS",
+        "_check_len",
+        "_clean_customer_id",
+        "_preview_or_done",
+        "_raise_tool_error",
+        "_text_assets",
+        "_to_micros",
+        "build_campaign_with_budget",
+    )
+
+    # get_resource_metadata is a read-only namespace and keeps its own
+    # one-line _raise_tool_error shim rather than importing the write
+    # layer's module. The shared implementation both shims delegate to is
+    # utils.raise_tool_error, so this is an alias, not a second
+    # implementation — a visible hole in the rule instead of a silent one.
+    EXEMPT = {"get_resource_metadata.py": {"_raise_tool_error"}}
+
+    @staticmethod
+    def _top_level_bindings(path):
+        """{name: lineno} for module-level defs and plain assignments."""
+        out = {}
+        tree = ast.parse(path.read_text(encoding="utf-8"), str(path))
+        for node in tree.body:
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                out[node.name] = node.lineno
+            elif isinstance(node, ast.Assign):
+                for target in node.targets:
+                    if isinstance(target, ast.Name):
+                        out[target.id] = node.lineno
+        return out
+
+    def test_no_tool_module_redefines_a_shared_helper(self):
+        tools_dir = pathlib.Path(list(tools_pkg.__path__)[0])
+        paths = sorted(tools_dir.glob("*.py"))
+        # Guards against the glob silently covering nothing.
+        self.assertGreaterEqual(len(paths), 16)
+
+        duplicates = []
+        for path in paths:
+            if path.name == "_write_common.py":
+                continue
+            bindings = self._top_level_bindings(path)
+            exempt = self.EXEMPT.get(path.name, frozenset())
+            for name in self.SHARED_NAMES:
+                if name in bindings and name not in exempt:
+                    duplicates.append(f"{path.name}:{bindings[name]} {name}")
+        self.assertEqual(
+            duplicates,
+            [],
+            "these modules define their own copy of a helper that lives in "
+            "ads_mcp/tools/_write_common.py; import it from there instead "
+            f"(file:line name): {duplicates}",
+        )
+
+    def test_write_common_defines_every_shared_name(self):
+        # The check above is only meaningful while the one copy still exists
+        # under these names.
+        for name in self.SHARED_NAMES:
+            with self.subTest(name=name):
+                self.assertTrue(hasattr(_write_common, name))
+
+    def test_the_exemption_still_describes_something_real(self):
+        # An exemption for a copy that no longer exists would quietly widen
+        # the hole for the next module that adds one.
+        tools_dir = pathlib.Path(list(tools_pkg.__path__)[0])
+        for filename, names in self.EXEMPT.items():
+            bindings = self._top_level_bindings(tools_dir / filename)
+            for name in names:
+                with self.subTest(file=filename, name=name):
+                    self.assertIn(name, bindings)
+
+    def test_write_common_declares_no_sub_server(self):
+        # coordinator.initialize_and_mount_tools imports every module under
+        # ads_mcp.tools and mounts each FastMCP instance it finds by that
+        # instance's own .name. A sub-server here would mount a namespace
+        # out of a library module.
+        found = [
+            attr_name
+            for attr_name in dir(_write_common)
+            if isinstance(getattr(_write_common, attr_name), FastMCP)
+        ]
+        self.assertEqual(found, [])
 
 
 class TestGaqlHelpers(unittest.TestCase):

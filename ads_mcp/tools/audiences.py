@@ -14,7 +14,8 @@ from mcp.types import ToolAnnotations
 from google.ads.googleads.errors import GoogleAdsException
 
 import ads_mcp.utils as utils
-from ads_mcp.tools.mutate import (
+from ads_mcp.tools._write_common import (
+    _WRITE_ANNOTATIONS as _WRITE,
     _clean_customer_id,
     _preview_or_done,
     _raise_tool_error,
@@ -22,7 +23,6 @@ from ads_mcp.tools.mutate import (
 
 audiences_mcp = FastMCP("audiences")
 
-_WRITE = ToolAnnotations(readOnlyHint=False, destructiveHint=False)
 _READ = ToolAnnotations(readOnlyHint=True)
 
 # Mirrors targeting.py's own _GENDERS guard: pre-validate against the
@@ -362,10 +362,20 @@ def list_audiences(
     except GoogleAdsException as ex:
         _raise_tool_error(ex)
 
+    cut_sections = []
     for section in ("audiences", "user_lists", "custom_segments"):
         if len(out[section]) > cap:
             out[section] = out[section][:cap]
             out["truncated"][section] = True
+            cut_sections.append(section)
+    # The per-section flags live inside a nested map that is easy to skim
+    # past, so one envelope-level warning names the sections that were cut
+    # — truncation is never silent, whichever section it hit.
+    if cut_sections:
+        out["warning"] = (
+            utils.truncation_warning(cap)
+            + f" Sections cut: {', '.join(cut_sections)}."
+        )
     return out
 
 

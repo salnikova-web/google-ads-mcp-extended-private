@@ -47,6 +47,44 @@ ALL_CATEGORIES = [
     "experiments",
 ]
 
+# Environment variables that configure OAuth (see oauth_configured()). Both
+# coordinator.py (building the GoogleProvider) and server.py (choosing the
+# transport) need the same answer to "is OAuth configured", so it lives here
+# once rather than being re-derived independently in each.
+OAUTH_CLIENT_ID_ENV_VAR = "GOOGLE_ADS_MCP_OAUTH_CLIENT_ID"
+OAUTH_CLIENT_SECRET_ENV_VAR = "GOOGLE_ADS_MCP_OAUTH_CLIENT_SECRET"
+
+
+def oauth_configured() -> bool:
+    """Returns whether OAuth is configured for this process.
+
+    OAuth is enabled only when *both* the client ID and client secret
+    environment variables are set. Exactly one of the two being set is a
+    half-configured OAuth setup: silently falling back to no-auth would
+    hide that misconfiguration from whoever set it up, so this warns (in
+    addition to returning False) rather than treating it the same as
+    neither being set.
+    """
+    client_id = os.environ.get(OAUTH_CLIENT_ID_ENV_VAR)
+    client_secret = os.environ.get(OAUTH_CLIENT_SECRET_ENV_VAR)
+
+    if bool(client_id) != bool(client_secret):
+        missing = (
+            OAUTH_CLIENT_SECRET_ENV_VAR
+            if client_id
+            else OAUTH_CLIENT_ID_ENV_VAR
+        )
+        logger.warning(
+            "Only one of %s/%s is set (missing %s); OAuth will not be "
+            "enabled. Set both or neither.",
+            OAUTH_CLIENT_ID_ENV_VAR,
+            OAUTH_CLIENT_SECRET_ENV_VAR,
+            missing,
+        )
+        return False
+
+    return bool(client_id and client_secret)
+
 
 class ToolsConfig:
     """Manages tool registration configuration parsed from YAML."""
@@ -54,6 +92,7 @@ class ToolsConfig:
     def __init__(self, config_dict: Dict[str, Any] | None = None):
         self._config = config_dict or {}
         self._warn_unknown_namespaces()
+        self._validate_enabled_tools_shapes()
 
     def _namespaces(self) -> Dict[str, Any] | None:
         """Returns the configured namespaces mapping, or None if unconfigured.
@@ -95,6 +134,50 @@ class ToolsConfig:
                 ", ".join(ALL_CATEGORIES),
             )
 
+    def _validate_enabled_tools_shapes(self) -> None:
+        """Validates every namespace's 'enabled_tools' shape at construction.
+
+        is_tool_enabled() used to raise this ValueError itself, lazily, the
+        first time a request happened to touch a malformed namespace -- so a
+        typo could sit in the config file unnoticed until whichever tool it
+        broke was finally called. Checking every namespace here instead means
+        a malformed config fails at construction time; ToolsConfig.load()
+        wraps that failure in its "Failed to parse configuration file"
+        startup error, so it surfaces immediately instead of per-request.
+        """
+        namespaces = self._namespaces()
+        if not namespaces:
+            return
+
+        for category, category_config in namespaces.items():
+            if not isinstance(category_config, dict):
+                continue
+
+            enabled_tools = category_config.get("enabled_tools")
+            if enabled_tools is None:
+                continue
+
+            if not isinstance(enabled_tools, (list, dict)):
+                raise ValueError(
+                    f"enabled_tools for namespace '{category}' must be a "
+                    f"list or a mapping, got "
+                    f"{type(enabled_tools).__name__}"
+                )
+
+    def is_namespace_mentioned(self, category: str) -> bool:
+        """Returns whether `category` is an explicit key in 'namespaces'.
+
+        Unlike is_namespace_enabled(), this is True even for a namespace
+        explicitly turned off (`category: false`) -- it answers "did the
+        configuration say anything at all about this category", not "is it
+        on". Returns False when there is no 'namespaces' key in the
+        configuration (nothing was said about any category, known or not).
+        """
+        namespaces = self._namespaces()
+        if namespaces is None:
+            return False
+        return category in namespaces
+
     @classmethod
     def _resolve_config_path(cls, filepath: str | None) -> str | None:
         """Resolves which config file to load.
@@ -122,8 +205,12 @@ class ToolsConfig:
             return explicit
 
         # 3: a config file in the working directory acts as a user override.
+        # Warning (not info): an ads_mcp logger with no handler attached
+        # only surfaces WARNING+ (see server._configure_stderr_logging), and
+        # silently picking up whatever tools_config.yaml happens to be in
+        # the cwd is exactly the kind of thing an operator needs to notice.
         if os.path.exists(DEFAULT_CONFIG_FILE):
-            logger.info(
+            logger.warning(
                 "Using tools configuration '%s' found in the working "
                 "directory.",
                 os.path.abspath(DEFAULT_CONFIG_FILE),
@@ -243,6 +330,11 @@ class ToolsConfig:
             # No explicit enabled_tools filter means all are enabled
             return True
 
+        # Shape (list or mapping -- nothing else) is guaranteed by
+        # _validate_enabled_tools_shapes(), which __init__ runs over every
+        # namespace at construction time, so there is no other case to
+        # handle here.
+        #
         # Handle list of dictionaries or list of strings
         # Format from proposal:
         # enabled_tools:
@@ -261,12 +353,6 @@ class ToolsConfig:
         # The natural YAML spelling (enabled_tools: {tool: false}) parses to a
         # mapping; treat it like the list form rather than silently enabling
         # everything, including the tool the user tried to disable.
-        if isinstance(enabled_tools, dict):
-            if tool_name in enabled_tools:
-                return bool(enabled_tools[tool_name])
-            return False
-
-        raise ValueError(
-            f"enabled_tools for namespace '{category}' must be a list or a "
-            f"mapping, got {type(enabled_tools).__name__}"
-        )
+        if tool_name in enabled_tools:
+            return bool(enabled_tools[tool_name])
+        return False

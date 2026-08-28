@@ -21,7 +21,7 @@
 # them (recommendation apply/dismiss) skip remote validation on dry-run
 # because the underlying API request has no `validate_only` field.
 #
-# Approximate tools/list weight: ~18.0KB, about 87% smaller than the full
+# Approximate tools/list weight: ≈20.4 KB, about 86% smaller than the full
 # 16-namespace default. See README-EXTENDED.md for the per-namespace
 # token-cost table these numbers come from.
 #

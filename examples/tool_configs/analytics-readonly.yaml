@@ -14,7 +14,7 @@
 # across the full server, all living in these three namespaces plus the
 # read-only tools inside other namespaces below).
 #
-# Approximate tools/list weight: ~9.3KB, about 93% smaller than the full
+# Approximate tools/list weight: ≈9.6 KB, about 93% smaller than the full
 # 16-namespace default. See README-EXTENDED.md for the per-namespace
 # token-cost table these numbers come from.
 #

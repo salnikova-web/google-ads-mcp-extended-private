@@ -62,9 +62,9 @@ python -m unittest tests.tools.mutate_test.КЛАС.тест   # один тес
 - Смоук-тести діфляться з `tests/smoke/golden_tools_list.json`. Будь-яка
   зміна імені/опису/схеми інструмента ламає їх, поки не перегенеровано:
   `python tests/smoke/generate_golden.py` — запускати ОДИН раз, останнім,
-  після всіх правок схем. Скрипт має безумовний `import google.genai`
-  (потрібен встановлений пакет). Вичистити `GOOGLE_ADS_MCP_TOOLS_CONFIG`
-  з env, інакше goldens недетерміновані.
+  після всіх правок схем (import google.genai у скрипті guarded; env
+  `GOOGLE_ADS_MCP_TOOLS_CONFIG` smoke_utils пінить сам — недетермінізм
+  goldens закритий).
 - `coordinator.py` монтує інструменти при імпорті — тести патчать
   `ToolsConfig.load` і кличуть `initialize_and_mount_tools` на свіжому
   FastMCP.
@@ -83,8 +83,10 @@ python -m unittest tests.tools.mutate_test.КЛАС.тест   # один тес
   наявних `is not None` гілок і тільки leaf-шляхами (не-leaf → 
   `FieldMaskError.FIELD_HAS_SUBFIELDS`). Безумовний `paths=[...]` зітре
   поля, які користувач не передавав.
-- `_WRITE_ANNOTATIONS` оголошено окремо в кожному write-модулі (13 шт.) —
-  правка константи зачіпає всі ~15 інструментів файлу.
+- `_WRITE_ANNOTATIONS` та спільні write-хелпери централізовано в
+  `ads_mcp/tools/_write_common.py` (mutate.py ре-експортує) — правка
+  константи зачіпає ВСІ ~98 write-інструментів одразу; дубль-копії ловить
+  інваріант-тест у write_invariants_test.py.
 - `search.py` — навмисний raw read-only passthrough GAQL, НЕ вразливість.
   Решта write-шляхів екранують через `gaql_str()`/`gaql_id()`.
 - Кеш клієнта: ніколи argless `lru_cache` (у hosted-режимі віддасть виклик
@@ -119,13 +121,31 @@ python -m unittest tests.tools.mutate_test.КЛАС.тест   # один тес
   перевірити, що `noxfile.py` не містить машинно-специфічних шляхів (або
   занейтралізувати `DEPLOY_SOURCE_REPO` через `GOOGLE_ADS_MCP_DEPLOY_REPO`).
 
-## Відомі хвости (не «лагодити» мимохідь, окремі задачі)
+## Пастки (симптом → правило → тест, аудит 28.08.2026)
 
-- Бандл-скіл `ads_mcp/skills/account-performance-diagnostics/` не пакується
-  (MANIFEST.in без `.md`) і має 2 дефекти: `metrics.conversion_value` →
-  правильно `conversions_value`; непрефіксовані імена інструментів
-  (`search` → `search_search`, `get_resource_metadata` →
-  `metadata_get_resource_metadata`).
+- 45 інструментів мовчки втратили б описи в tools/list: парсер FastMCP
+  викидає `LABEL:`-блок з відступним продовженням, якщо блок починає новий
+  абзац → продовження тримати на відступі докстрінга → тест виживання
+  описів у `schema_test.py` (усі 101, ratio ≥0.85, без тихих скіпів).
+- Виняток GAQL «втікав» повз хендлер: gapic `search()` шле page 1 одразу,
+  а page 2+ кидає ПІД ЧАС ітерації → і виклик, і ітерація всередині try →
+  тести кидають на 2-му рядку через генератор (mutate_test).
+- `logger.warning` роками писав у нікуди, а `assertLogs` був зелений:
+  NullHandler + жоден хост не конфігурує root → entrypoint сервера сам
+  вішає stderr-handler на `"ads_mcp"` → server_test перевіряє РЕАЛЬНУ
+  емісію в потік, не assertLogs.
+- fastmcp загортає винятки в `ToolError(...) from` ПІД middleware-ланцюгом
+  → middleware ходить по `__cause__`; ніде поза `middleware.py` не писати
+  `raise ToolError(...) from` → AST-скан `TestChainedToolErrorInvariant`.
+- Модель бачить лише name/description/inputSchema: `title`/`idempotentHint`
+  мертві, працює тільки `readOnlyHint` (гейтить plan mode Claude Code) —
+  його точність тримає біконтіонал-тест (`confirm` ↔ readOnlyHint=False).
+- Enum-и в схемах безкоштовні через `Annotated[str, Field(json_schema_extra=
+  {"enum": …})]` (+157 Б на 22 параметри); `Literal` заборонений там, де є
+  `.upper()`-нормалізація — зламає lowercase-виклики.
+- «Який коміт живий?»: `direct_url.json → vcs_info.commit_id` в
+  інстальованому dist-info — єдина правда для pipx-VCS-інсталяцій;
+  deploy-гейт звіряє його з `git rev-parse HEAD`.
 
 Доменні правила аналітики RiseGuide тут НЕ живуть — вони в персональних
 скілах (`~/.claude/skills/`).

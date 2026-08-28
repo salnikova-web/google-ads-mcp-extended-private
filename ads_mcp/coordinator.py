@@ -12,13 +12,22 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Module declaring the singleton MCP instance.
+"""Declares the parent MCP instance and mounts the tool sub-servers onto it.
 
-The singleton allows other modules to register their tools with the same MCP
-server using `@mcp.tool` annotations, thereby 'coordinating' the bootstrapping
-of the server.
+Each module under ``ads_mcp.tools`` defines its own ``FastMCP`` sub-server
+(e.g. ``search_mcp = FastMCP("search")``) and registers its tools on that
+sub-server -- not on this module's singleton via ``@mcp.tool``. There is no
+central registry of sub-servers to keep in sync: ``initialize_and_mount_tools``
+finds them by iterating the ``ads_mcp.tools`` package with ``pkgutil`` and
+scanning each imported module's attributes for ``FastMCP`` instances. Every
+discovered sub-server is then mounted onto the parent through a
+``FastMCPProvider`` wrapped in a ``Transform`` (``_EnabledToolsFilter``) that
+filters tools according to ``ToolsConfig`` -- enabled namespaces and
+per-tool ``enabled_tools`` overrides -- at mount time, rather than by
+removing tools from the (module-level, shared) sub-server object itself.
 """
 
+import logging
 import os
 from typing import Sequence
 from fastmcp import FastMCP
@@ -26,16 +35,21 @@ from fastmcp.server.auth.providers.google import GoogleProvider
 from fastmcp.server.providers import FastMCPProvider
 from fastmcp.server.transforms import Transform
 
+from ads_mcp.config import (
+    OAUTH_CLIENT_ID_ENV_VAR,
+    OAUTH_CLIENT_SECRET_ENV_VAR,
+    oauth_configured,
+)
 from ads_mcp.middleware import GoogleAdsErrorMiddleware
 
-_CLIENT_ID = os.environ.get("GOOGLE_ADS_MCP_OAUTH_CLIENT_ID")
-_CLIENT_SECRET = os.environ.get("GOOGLE_ADS_MCP_OAUTH_CLIENT_SECRET")
+logger = logging.getLogger(__name__)
+
 _BASE_URL = os.environ.get("GOOGLE_ADS_MCP_BASE_URL", "http://localhost:8080")
 
-if _CLIENT_ID and _CLIENT_SECRET:
+if oauth_configured():
     auth = GoogleProvider(
-        client_id=_CLIENT_ID,
-        client_secret=_CLIENT_SECRET,
+        client_id=os.environ[OAUTH_CLIENT_ID_ENV_VAR],
+        client_secret=os.environ[OAUTH_CLIENT_SECRET_ENV_VAR],
         base_url=_BASE_URL,
         required_scopes=[
             "openid",
@@ -79,7 +93,7 @@ class _EnabledToolsFilter(Transform):
 
 def initialize_and_mount_tools(parent_mcp: FastMCP) -> None:
     """Loads the tools configuration and dynamically mounts the tools sub-servers."""
-    from ads_mcp.config import ToolsConfig
+    from ads_mcp.config import ALL_CATEGORIES, ToolsConfig
     import importlib
     import pkgutil
     import ads_mcp.tools as tools_pkg
@@ -109,10 +123,35 @@ def initialize_and_mount_tools(parent_mcp: FastMCP) -> None:
                 category = attr_val.name
                 sub_servers[category] = attr_val
 
+    # Mount-time sanity check: every discovered sub-server should be a name
+    # the rest of the config system knows about. This is a warning, not a
+    # crash -- a fork adding a 17th tools module must still be able to start
+    # up -- but the trap is real: a new category has to be registered in
+    # three places (the module itself, ALL_CATEGORIES in config.py, and
+    # tools_config.yaml) to ever become mountable, and it is easy to do the
+    # first without the other two.
+    unregistered = sorted(set(sub_servers) - set(ALL_CATEGORIES))
+    if unregistered:
+        logger.warning(
+            "Discovered sub-server(s) not in ads_mcp.config.ALL_CATEGORIES: "
+            "%s. A tools module must be registered in three places -- its "
+            "own module, ALL_CATEGORIES, and tools_config.yaml -- or it "
+            "will never be mountable.",
+            ", ".join(unregistered),
+        )
+
     config = ToolsConfig.load()
 
     for category, sub_mcp in sub_servers.items():
         if not config.is_namespace_enabled(category):
+            is_unregistered = category not in ALL_CATEGORIES
+            is_unmentioned = not config.is_namespace_mentioned(category)
+            if is_unregistered and is_unmentioned:
+                logger.warning(
+                    "Sub-server %r discovered but not configured/enabled "
+                    "-- it will not be mounted.",
+                    category,
+                )
             continue
 
         # Determine prefix/namespace

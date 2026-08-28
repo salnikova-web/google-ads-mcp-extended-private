@@ -12,16 +12,27 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""Compares live LLM token usage against tests/smoke/llm_cases.json baselines.
+
+Not a unittest: it talks to the real Gemini API to catch prompt/response
+token regressions, so it is invoked via `nox -s token_usage` instead of the
+`*_test.py` discovery pattern. google-genai is optional at the repo level
+(see tests/smoke/generate_golden.py for the same guard), so both imports
+below are guarded together and `main` skips cleanly (exit 0) instead of
+crashing when the package or GEMINI_API_KEY is unavailable.
+"""
+
 import json
 import os
 import sys
 import time
 from tests.smoke import smoke_utils
-from google.genai import types
 
 try:
+    from google.genai import types
     from tests.smoke import llm_sender
 except ImportError:
+    types = None
     llm_sender = None
 
 
@@ -53,12 +64,15 @@ def compare_usage(current, baseline, label, threshold=0.05):
 
 def main():
     if not os.environ.get("GEMINI_API_KEY"):
-        print("GEMINI_API_KEY environment variable not set.")
-        sys.exit(1)
+        print(
+            "GEMINI_API_KEY environment variable not set; skipping token "
+            "usage check."
+        )
+        sys.exit(0)
 
     if llm_sender is None:
-        print("llm_sender is not available.")
-        sys.exit(1)
+        print("google-genai is not installed; skipping token usage check.")
+        sys.exit(0)
 
     cases_path = os.path.join(os.path.dirname(__file__), "llm_cases.json")
     if not os.path.exists(cases_path):

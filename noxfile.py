@@ -16,6 +16,7 @@ import glob
 import json
 import os
 import pathlib
+import shutil
 import sys
 
 import nox
@@ -62,7 +63,7 @@ TEST_COMMAND = [
 FREEZE_COMMAND = [sys.executable, "-m", "pip", "freeze"]
 TEST_DEPENDENCIES = [
     "pyfakefs>=5.0.0,<6.0",
-    "coverage==6.5.0",
+    "coverage>=7.6",
 ]
 
 # Pinned so `nox -s deploy` gives the same black verdict on every machine
@@ -117,34 +118,108 @@ def format(session):
     _format(session)
 
 
+@nox.session(venv_backend="none")
+def clean(session):
+    """Removes stale build artifacts from the working tree.
+
+    Deletes build/, dist/, *.egg-info directories, and .coverage* files at
+    the repo root. All of these are gitignored but accumulate across local
+    `build`/`test` runs and pollute every grep of the tree. Never touches
+    .venv/, .nox/, or .superpowers/ -- this session only ever targets the
+    specific artifact names above. Safe to run repeatedly: a second run
+    with nothing left to remove just logs that and exits clean.
+    """
+    targets = []
+    for name in ("build", "dist"):
+        path = REPO_ROOT / name
+        if path.is_dir():
+            targets.append(path)
+    targets.extend(sorted(REPO_ROOT.glob("*.egg-info")))
+    targets.extend(sorted(REPO_ROOT.glob(".coverage*")))
+
+    if not targets:
+        session.log("Nothing to clean.")
+        return
+
+    for target in targets:
+        session.log(f"Removing {target}")
+        if target.is_dir():
+            shutil.rmtree(target)
+        else:
+            target.unlink()
+
+
+# `tests` runs once per entry in PYTHON_VERSIONS, and TEST_COMMAND uses
+# `coverage run --append` so every entry's data accumulates into one shared
+# .coverage file. Without an erase step that file also accumulates *across*
+# separate `nox -s tests` invocations, forever. This flag makes sure erase
+# happens exactly once per invocation (nox imports this module once and
+# runs all matrix entries in that same process) rather than once per entry,
+# which would just erase the previous entry's coverage.
+_coverage_erased = False
+
+
+def _erase_coverage_once(session):
+    """Erases stale coverage data the first time it's called this run."""
+    global _coverage_erased
+    if not _coverage_erased:
+        session.run("coverage", "erase")
+        _coverage_erased = True
+
+
 @nox.session(python=PYTHON_VERSIONS)
 def tests(session):
     session.install(".")
     # modules for testing
     session.install(*TEST_DEPENDENCIES)
     session.run(*FREEZE_COMMAND)
+    _erase_coverage_once(session)
     session.run(
         *TEST_COMMAND,
     )
 
 
-@nox.session(venv_backend="none")
+@nox.session(python="3.12")
+def coverage_report(session):
+    """Prints the combined report for the `tests` matrix's coverage data.
+
+    Run after `nox -s tests`: that session's `coverage run --append` steps
+    accumulate into one shared .coverage file that nothing else reports on.
+    """
+    session.install("coverage>=7.6")
+    session.run("coverage", "report")
+
+
+@nox.session(python="3.12")
 def smoke_tests(session):
     """Runs the smoke tests."""
-    session.run(sys.executable, "-m", "unittest", "tests/smoke/smoke_test.py")
+    session.install(".")
+    session.run("python", "-m", "unittest", "tests.smoke.smoke_test")
 
 
-@nox.session(venv_backend="none")
+@nox.session(python="3.12")
 def llm_tests(session):
     """Runs the LLM tool selection smoke tests."""
-    session.run(sys.executable, "-m", "pip", "install", "google-genai")
-    session.run(sys.executable, "-m", "unittest", "tests/smoke/llm_test.py")
+    session.install(".", "google-genai")
+    session.run("python", "-m", "unittest", "tests.smoke.llm_test")
 
 
-@nox.session(venv_backend="none")
+@nox.session(python="3.12")
 def update_smoke_golden(session):
     """Updates the smoke test golden file."""
-    session.run(sys.executable, "-m", "tests.smoke.generate_golden")
+    session.install(".")
+    session.run("python", "-m", "tests.smoke.generate_golden")
+
+
+@nox.session(python="3.12")
+def token_usage(session):
+    """Compares live LLM token usage against tests/smoke/llm_cases.json.
+
+    Talks to the real Gemini API. Skips cleanly (exit 0) instead of
+    failing the session when GEMINI_API_KEY is unset.
+    """
+    session.install(".", "google-genai")
+    session.run("python", "-m", "tests.smoke.token_usage_check")
 
 
 def _deploy_guard(session):

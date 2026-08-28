@@ -15,7 +15,8 @@ from mcp.types import ToolAnnotations
 from google.ads.googleads.errors import GoogleAdsException
 
 import ads_mcp.utils as utils
-from ads_mcp.tools.mutate import (
+from ads_mcp.tools._write_common import (
+    _WRITE_ANNOTATIONS as _WRITE,
     _clean_customer_id,
     _preview_or_done,
     _raise_tool_error,
@@ -23,7 +24,6 @@ from ads_mcp.tools.mutate import (
 
 tracking_mcp = FastMCP("tracking")
 
-_WRITE = ToolAnnotations(readOnlyHint=False, destructiveHint=False)
 _READ = ToolAnnotations(readOnlyHint=True)
 
 
@@ -244,8 +244,14 @@ def list_tracking(
             "tracking_url_template": acc_rows[0].customer.tracking_url_template,
             "final_url_suffix": acc_rows[0].customer.final_url_suffix,
         }
-    return {
+    result: Dict[str, Any] = {
         "account": account,
         "campaigns": campaigns,
         "truncated": truncated,
     }
+    # Keys stay as they are (account/campaigns/truncated); the cut is what
+    # gains a voice — a truncated list must never be read as "this
+    # campaign has no tracking".
+    if truncated:
+        result["warning"] = utils.truncation_warning(limit)
+    return result

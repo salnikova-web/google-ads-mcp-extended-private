@@ -13,7 +13,8 @@ side effects that validate_only cannot fully cover, so nothing is sent to
 Google Ads and nothing is validated).
 """
 
-from typing import Any, Dict, Optional
+import logging
+from typing import Any, Dict, NoReturn, Optional
 
 from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
@@ -21,18 +22,50 @@ from mcp.types import ToolAnnotations
 from google.ads.googleads.errors import GoogleAdsException
 
 import ads_mcp.utils as utils
-from ads_mcp.tools.mutate import (
+from ads_mcp.tools._write_common import (
+    _WRITE_ANNOTATIONS as _WRITE,
     _clean_customer_id,
     _preview_or_done,
     _raise_tool_error,
 )
 
+logger = logging.getLogger(__name__)
+
 experiments_mcp = FastMCP("experiments")
 
-_WRITE = ToolAnnotations(readOnlyHint=False, destructiveHint=False)
 _READ = ToolAnnotations(readOnlyHint=True)
 
 _TYPES = ("SEARCH_CUSTOM", "DISPLAY_CUSTOM", "VIDEO_CUSTOM")
+
+# What the caller has to know when creation got past step 1: the shell is
+# real, it holds the name, and re-running the tool cannot be the fix.
+_ORPHAN_CONTEXT = (
+    "experiment {resource_name} was created but arms/scheduling failed — "
+    "a retry with the same name will hit duplicate-name; end or reuse it "
+    "(experiments_experiments_list to find it, then "
+    "experiments_experiment_end)."
+)
+
+
+def _raise_orphaned_experiment(
+    experiment_rn: str, ex: GoogleAdsException
+) -> NoReturn:
+    """Re-raises a post-creation failure naming the experiment left behind.
+
+    The formatted message from the module's normal error path is kept
+    verbatim and the orphan context is appended to it. The re-raise is
+    bare: chaining it to the ``GoogleAdsException`` would give
+    ``GoogleAdsErrorMiddleware`` a ``__cause__`` to walk, and it would
+    throw this message away for a generic one (see
+    ``_write_common._raise_tool_error``).
+    """
+    try:
+        _raise_tool_error(ex)
+    except ToolError as formatted:
+        raise ToolError(
+            f"{formatted}\n"
+            + _ORPHAN_CONTEXT.format(resource_name=experiment_rn)
+        )
 
 
 @experiments_mcp.tool(annotations=_WRITE)
@@ -105,8 +138,16 @@ def experiment_create(
 
     try:
         exp_response = exp_service.mutate_experiments(request=exp_request)
-        experiment_rn = exp_response.results[0].resource_name
+    except GoogleAdsException as ex:
+        # Step 1 failed, so nothing was created and there is no orphan.
+        _raise_tool_error(ex)
+    experiment_rn = exp_response.results[0].resource_name
 
+    # Everything below runs with the experiment shell already in the
+    # account, holding its (unique) name. A failure here used to surface as
+    # a bare API error, and the obvious next move -- run the tool again --
+    # then failed on duplicate-name with no hint as to why.
+    try:
         # 2. Control + treatment arms.
         arm_request = client.get_type("MutateExperimentArmsRequest")
         arm_request.customer_id = customer_id
@@ -137,7 +178,18 @@ def experiment_create(
         schedule_request.resource_name = experiment_rn
         exp_service.schedule_experiment(request=schedule_request)
     except GoogleAdsException as ex:
-        _raise_tool_error(ex)
+        _raise_orphaned_experiment(experiment_rn, ex)
+    except Exception:
+        # Broad, and only to attach context: a transport or auth failure
+        # leaves the same orphan behind. The original travels on untouched
+        # so GoogleAdsErrorMiddleware can still translate it -- the log
+        # line is where the resource name survives in that case.
+        logger.warning(
+            "google-ads experiment %s was created but arms/scheduling "
+            "failed; a retry with the same name will hit duplicate-name.",
+            experiment_rn,
+        )
+        raise
 
     preview["experiment_resource"] = experiment_rn
     preview["note"] = (
@@ -222,11 +274,17 @@ def experiments_list(
                             "campaigns": list(r.experiment_arm.campaigns),
                         }
                     )
-        return {
+        result: Dict[str, Any] = {
             "experiments": list(experiments.values()),
             "returned": len(experiments),
             "truncated": truncated,
         }
+        # Keys stay as they are (experiments/returned/truncated); the cut
+        # is what gains a voice — an experiment missing from a truncated
+        # list is not proof it does not exist.
+        if truncated:
+            result["warning"] = utils.truncation_warning(limit)
+        return result
     except GoogleAdsException as ex:
         _raise_tool_error(ex)
 

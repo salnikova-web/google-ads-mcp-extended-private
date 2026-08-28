@@ -19,7 +19,7 @@ from unittest.mock import patch
 from fastmcp import FastMCP
 from fastmcp.exceptions import NotFoundError
 from ads_mcp.coordinator import initialize_and_mount_tools
-from ads_mcp.config import ToolsConfig
+from ads_mcp.config import ALL_CATEGORIES, ToolsConfig
 
 
 class TestToolsMounting(unittest.IsolatedAsyncioTestCase):
@@ -172,3 +172,56 @@ class TestToolsMounting(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(
             "customers_list_accessible_customers", restricted_names
         )
+
+    @patch("ads_mcp.config.ToolsConfig.load")
+    async def test_mounting_default_discovery_has_no_registration_warnings(
+        self, mock_load
+    ):
+        """Real discovery against the real ALL_CATEGORIES must not warn.
+
+        This is a regression guard for the two mount-time registration
+        checks: pkgutil discovery also imports helper modules with no
+        FastMCP instance of their own (e.g. tools/_write_common.py), which
+        must keep contributing nothing to `sub_servers` rather than being
+        mistaken for an unregistered 17th category.
+        """
+        mock_load.return_value = ToolsConfig({})
+        parent = FastMCP("Test Parent")
+        with self.assertNoLogs("ads_mcp.coordinator", level="WARNING"):
+            initialize_and_mount_tools(parent)
+
+    @patch(
+        "ads_mcp.config.ALL_CATEGORIES",
+        [category for category in ALL_CATEGORIES if category != "pmax"],
+    )
+    @patch("ads_mcp.config.ToolsConfig.load")
+    async def test_mounting_warns_on_category_missing_from_all_categories(
+        self, mock_load
+    ):
+        """A discovered sub-server absent from (a shrunk) ALL_CATEGORIES
+        must warn from both mount-time checks and must not be mounted --
+        this simulates a fork adding a tools module without registering it.
+        """
+        mock_load.return_value = ToolsConfig({})
+        parent = FastMCP("Test Parent")
+
+        with self.assertLogs("ads_mcp.coordinator", level="WARNING") as cm:
+            initialize_and_mount_tools(parent)
+
+        # The mount-time subset check and the per-category check are two
+        # distinct warnings; both must name "pmax".
+        pmax_records = [message for message in cm.output if "pmax" in message]
+        self.assertEqual(len(pmax_records), 2)
+        self.assertTrue(
+            any("ALL_CATEGORIES" in message for message in pmax_records)
+        )
+        self.assertTrue(
+            any(
+                "discovered but not configured" in message
+                for message in pmax_records
+            )
+        )
+
+        tools = await parent.list_tools()
+        tool_names = [t.name for t in tools]
+        self.assertFalse(any(name.startswith("pmax_") for name in tool_names))
