@@ -270,6 +270,60 @@ Cross-cutting parameters shared by several tools:
 | `experiments_experiment_end` | Ends a running experiment. |
 | `experiments_experiment_promote` | Promotes a winning experiment to the base campaign. |
 
+## Context-weight profiles
+
+Every enabled namespace's tool schemas are sent to the LLM on every
+`tools/list` call. The bundled `ads_mcp/tools_config.yaml` enables all 16
+namespaces by default (repo neutrality: no namespace is singled out as
+optional). If your use case does not need the full surface, you can point
+the server at a smaller configuration instead — see
+[Configuring and Namespacing Tools](README.md#configuring-and-namespacing-tools)
+for the resolution order and syntax; the short version is: save a
+`namespaces:` config to a file and set the `GOOGLE_ADS_MCP_TOOLS_CONFIG`
+environment variable to its path. That path is read at server startup, so
+switching or editing profiles only needs a client restart, never a
+reinstall — unlike edits to the bundled `ads_mcp/tools_config.yaml`, which
+ships inside the installed package.
+
+Approximate `tools/list` weight per namespace, measured on v0.2.0 (the two
+batch tools and wave-2 schema work shift these slightly):
+
+| Namespace | Tools | Approx. size |
+|---|---|---|
+| mutate | 17 | 23.3 KB |
+| demandgen | 13 | 21.3 KB |
+| pmax | 11 | 16.5 KB |
+| targeting | 12 | 13.5 KB |
+| optimize | 8 | 8.7 KB |
+| search | 1 | 7.3 KB |
+| shopping | 5 | 6.6 KB |
+| extensions | 6 | 6.3 KB |
+| audiences | 5 | 6.0 KB |
+| display | 3 | 5.6 KB |
+| negatives | 5 | 4.4 KB |
+| video | 3 | 4.3 KB |
+| experiments | 4 | 4.2 KB |
+| tracking | 3 | 3.5 KB |
+| metadata | 1 | 1.3 KB |
+| customers | 1 | 0.7 KB |
+
+[examples/tool_configs/](examples/tool_configs/) has three ready-made
+profiles built from this table (each with header comments on activation and
+every disabled namespace listed, commented out, for a quick edit to
+re-enable it):
+
+| Profile | Namespaces enabled | Approx. size | vs. full |
+|---|---|---|---|
+| `analytics-readonly.yaml` | customers, search, metadata | ≈9.3 KB | −93% |
+| `analytics-plus.yaml` | + optimize | ≈18.0 KB | −87% |
+| `ops-core.yaml` | customers, search, metadata, mutate, negatives, targeting, extensions, optimize | ≈65.5 KB | −51% |
+
+`analytics-plus` trades a small size increase for change-history and
+recommendations reads, which live in `optimize` — that namespace also
+carries write tools (label apply, recommendation apply/dismiss, seasonality
+and data-exclusion create), all gated behind the same dry-run `confirm`
+parameter as every other write tool (see "Safety model" above).
+
 ## Install
 
 1. Requirements: Python 3.10+, pipx (`python3 -m pip install --user pipx`),

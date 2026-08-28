@@ -1,0 +1,51 @@
+# Example tools_config.yaml profile: analytics-plus
+#
+# Activation: point the server at this file via the
+# GOOGLE_ADS_MCP_TOOLS_CONFIG environment variable, e.g.:
+#
+#   GOOGLE_ADS_MCP_TOOLS_CONFIG=/path/to/analytics-plus.yaml
+#
+# This is read at server startup, so switching profiles or editing this
+# file only needs a restart of the MCP client — no reinstall of the
+# package, unlike changes to the bundled ads_mcp/tools_config.yaml.
+#
+# Profile: analytics-readonly (customers, search, metadata) plus optimize,
+# for change-history and recommendations reporting.
+#
+# Note: optimize is not read-only — besides change_history and
+# optimize_recommendations_list (reads), it also carries write tools
+# (label create/apply, recommendation apply/dismiss, seasonality
+# adjustment create, data exclusion create). All of them default to a
+# dry-run preview behind the `confirm` parameter like every other write
+# tool in this server (see README-EXTENDED.md, "Safety model") — two of
+# them (recommendation apply/dismiss) skip remote validation on dry-run
+# because the underlying API request has no `validate_only` field.
+#
+# Approximate tools/list weight: ~18.0KB, about 87% smaller than the full
+# 16-namespace default. See README-EXTENDED.md for the per-namespace
+# token-cost table these numbers come from.
+#
+# Reminder on semantics (ads_mcp/config.py): once a `namespaces` key is
+# present, any namespace NOT listed under it is disabled. There is no
+# need to list disabled namespaces explicitly, but every other namespace
+# is listed below, commented out, so enabling one is a quick edit:
+# uncomment the line and flip `false` to `true`.
+
+namespaces:
+  customers: true
+  search: true
+  metadata: true
+  optimize: true
+
+  # mutate: false
+  # demandgen: false
+  # pmax: false
+  # extensions: false
+  # targeting: false
+  # shopping: false
+  # video: false
+  # display: false
+  # tracking: false
+  # audiences: false
+  # negatives: false
+  # experiments: false
