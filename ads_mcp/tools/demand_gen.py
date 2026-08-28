@@ -284,6 +284,9 @@ def campaign_create(
             MAXIMIZE_CLICKS.
         target_cpa: Optional target CPA in account currency.
         target_roas: Optional target ROAS as decimal (3.5 = 350%).
+        start_date: "YYYY-MM-DD" (dashes required), account timezone;
+            defaults to today.
+        end_date: "YYYY-MM-DD" (dashes required), inclusive; omit for none.
         confirm: False = dry-run preview (default), True = apply.
 
     NOTE: the Demand Gen "Asset optimization" toggles (shorter videos,

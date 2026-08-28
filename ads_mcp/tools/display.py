@@ -106,6 +106,9 @@ def campaign_create(
             MAXIMIZE_CLICKS or MANUAL_CPC.
         target_cpa: Optional target CPA in account currency.
         target_roas: Optional target ROAS as decimal.
+        start_date: "YYYY-MM-DD" (dashes required), account timezone;
+            defaults to today.
+        end_date: "YYYY-MM-DD" (dashes required), inclusive; omit for none.
         confirm: False = dry-run preview (default), True = apply.
     """
     customer_id = _clean_customer_id(customer_id)

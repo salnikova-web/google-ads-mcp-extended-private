@@ -140,6 +140,9 @@ def campaign_create(
             BUSINESS_NAME asset (required with Brand Guidelines).
         logo_asset_id: Asset id of a square logo image (required with
             Brand Guidelines).
+        start_date: "YYYY-MM-DD" (dashes required), account timezone;
+            defaults to today.
+        end_date: "YYYY-MM-DD" (dashes required), inclusive; omit for none.
         confirm: False = dry-run preview (default), True = apply.
     """
     customer_id = _clean_customer_id(customer_id)

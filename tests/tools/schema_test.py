@@ -206,21 +206,49 @@ class TestDocstringBodyReachesTheDescription(unittest.IsolatedAsyncioTestCase):
         initialize_and_mount_tools(parent)
 
         bodies = self._source_bodies()
+        tools = await parent.list_tools()
+        self.assertGreater(len(tools), 0, "no tools mounted")
+
         truncated = []
+        blank = []
+        unmatched = []
         checked = 0
-        for tool in await parent.list_tools():
+        for tool in tools:
             description = (tool.description or "").strip()
             if not description:
+                blank.append(tool.name)
                 continue
             body = bodies.get(description.splitlines()[0].strip())
             if body is None:
+                unmatched.append(tool.name)
                 continue
             checked += 1
             # The parser reflows whitespace, so compare lengths rather than
             # demanding an exact match.
             if len(description) < len(body) * 0.85:
                 truncated.append((tool.name, len(body), len(description)))
-        self.assertGreater(checked, 50, "the scan matched almost no tools")
+
+        # A tool this scan cannot line up with its source docstring is not
+        # "fine", it is UNCHECKED: it would sail through even with its whole
+        # body swallowed. Both escape hatches are therefore failures, not
+        # skips, so the pin cannot go dark by half the surface quietly
+        # dropping out of the comparison.
+        self.assertEqual(
+            blank, [], f"tools reached tools/list with no description: {blank}"
+        )
+        self.assertEqual(
+            unmatched,
+            [],
+            "these tools' descriptions no longer start with their docstring's "
+            "first line, so this test silently stopped covering them — either "
+            "the rendering changed or the description is generated rather "
+            f"than taken from the docstring: {unmatched}",
+        )
+        self.assertEqual(
+            checked,
+            len(tools),
+            "every mounted tool must be compared against its source",
+        )
         self.assertEqual(
             truncated,
             [],
