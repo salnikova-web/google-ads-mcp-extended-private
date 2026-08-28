@@ -119,6 +119,32 @@ python -m unittest tests.tools.mutate_test.КЛАС.тест   # один тес
   перевірити, що `noxfile.py` не містить машинно-специфічних шляхів (або
   занейтралізувати `DEPLOY_SOURCE_REPO` через `GOOGLE_ADS_MCP_DEPLOY_REPO`).
 
+## Пастки (симптом → правило → тест, аудит 28.08.2026)
+
+- 45 інструментів мовчки втратили б описи в tools/list: парсер FastMCP
+  викидає `LABEL:`-блок з відступним продовженням, якщо блок починає новий
+  абзац → продовження тримати на відступі докстрінга → тест виживання
+  описів у `schema_test.py` (усі 101, ratio ≥0.85, без тихих скіпів).
+- Виняток GAQL «втікав» повз хендлер: gapic `search()` шле page 1 одразу,
+  а page 2+ кидає ПІД ЧАС ітерації → і виклик, і ітерація всередині try →
+  тести кидають на 2-му рядку через генератор (mutate_test).
+- `logger.warning` роками писав у нікуди, а `assertLogs` був зелений:
+  NullHandler + жоден хост не конфігурує root → entrypoint сервера сам
+  вішає stderr-handler на `"ads_mcp"` → server_test перевіряє РЕАЛЬНУ
+  емісію в потік, не assertLogs.
+- fastmcp загортає винятки в `ToolError(...) from` ПІД middleware-ланцюгом
+  → middleware ходить по `__cause__`; ніде поза `middleware.py` не писати
+  `raise ToolError(...) from` → AST-скан `TestChainedToolErrorInvariant`.
+- Модель бачить лише name/description/inputSchema: `title`/`idempotentHint`
+  мертві, працює тільки `readOnlyHint` (гейтить plan mode Claude Code) —
+  його точність тримає біконтіонал-тест (`confirm` ↔ readOnlyHint=False).
+- Enum-и в схемах безкоштовні через `Annotated[str, Field(json_schema_extra=
+  {"enum": …})]` (+157 Б на 22 параметри); `Literal` заборонений там, де є
+  `.upper()`-нормалізація — зламає lowercase-виклики.
+- «Який коміт живий?»: `direct_url.json → vcs_info.commit_id` в
+  інстальованому dist-info — єдина правда для pipx-VCS-інсталяцій;
+  deploy-гейт звіряє його з `git rev-parse HEAD`.
+
 ## Відомі хвости (не «лагодити» мимохідь, окремі задачі)
 
 - Бандл-скіл `ads_mcp/skills/account-performance-diagnostics/` не пакується
