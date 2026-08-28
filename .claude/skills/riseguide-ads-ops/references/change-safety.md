@@ -20,14 +20,25 @@ cohort-method.md): mature/PMax із плюсовим ROI не мають бут�
 - `optimize_recommendation_apply` — у dry-run НЕ звертається до Google
   (локальне прев'ю), помилка вилізе лише на confirm=true.
 - Будь-які bulk-операції — прев'ю поштучно, не сумарно.
-- Видалення через `status="REMOVED"` роблять 4 інструменти, у яких
-  `destructiveHint` хибно стоїть `False` (клієнти авто-апрувлять):
-  `mutate_campaign_update_status`, `mutate_ad_group_update`,
-  `mutate_ad_update_status`, `pmax_asset_group_update` — подвійне
-  підтвердження поіменним переліком «видаляю X, Y, Z — так?».
-- `demandgen_ad_create_video`: enum `call_to_action` валідується лише на
-  `confirm=true` — тайпо проходить dry-run, падає на apply і лишає
-  orphan asset.
+- Видалення через `status="REMOVED"` роблять кілька інструментів; усі
+  вони, включно з чотирма, де раніше `destructiveHint` хибно стояв
+  `False` (`mutate_campaign_update_status`, `mutate_ad_group_update`,
+  `mutate_ad_update_status`, `pmax_asset_group_update`), тепер несуть
+  `destructiveHint=true` — виправлено хардненням 0.1.0 (перевірено:
+  усі чотири мають явний `ToolAnnotations(readOnlyHint=False,
+  destructiveHint=True)` у коді). Клієнт більше не авто-апрувить їх
+  мовчки, але подвійне підтвердження поіменним переліком «видаляю
+  X, Y, Z — так?» лишається доброю практикою поверх клієнтського гейту.
+- `demandgen_ad_create_video`: тайпо в `call_to_action` тепер ловиться на
+  dry-run теж — enum резолвиться і кидає помилку до відправки запиту,
+  незалежно від `confirm` (виправлено хардненням 0.1.0). Резидуальний
+  ризик лишається: сам CTA-asset (окремий `mutate_assets` виклик)
+  створюється й лінкується ТІЛЬКИ на `confirm=true` — якщо після
+  успішного створення asset'а сам mutate оголошення впаде з іншої
+  причини, asset лишається orphan. Це не покривається dry-run
+  структурно (посилання на CTA просто відсутнє в прев'ю), тому
+  прев'ю не повністю покриває apply — перевіряти результат читанням
+  після apply, як завжди.
 
 ## Після зміни
 
