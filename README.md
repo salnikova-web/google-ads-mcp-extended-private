@@ -45,6 +45,8 @@ namespaces:
   search: "query"
 
   # Option 3: Fine-grained control over tools in a category
+  # (list every tool you want enabled — any tool left out of
+  # enabled_tools, e.g. get_field_details below, stays disabled)
   metadata:
     enabled: true
     prefix: "metadata"

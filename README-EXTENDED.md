@@ -3,8 +3,8 @@
 ## Overview
 
 This repository extends the read-only Google Ads MCP server with **write
-tools** for campaign management. The server exposes **100 tools** across 16
-namespaces: 16 read-only tools (reporting, lookups and listings) and 84 write
+tools** for campaign management. The server exposes **101 tools** across 16
+namespaces: 17 read-only tools (reporting, lookups and listings) and 84 write
 tools, all of which default to a dry-run preview (see
 [Safety model](#safety-model)).
 
@@ -107,6 +107,7 @@ Cross-cutting parameters shared by several tools:
 | Tool | Description |
 |---|---|
 | `metadata_get_resource_metadata` | Read-only: selectable, filterable and sortable fields for a resource type, e.g. "campaign". |
+| `metadata_get_field_details` | Read-only: data type, enum values and resource compatibility for specific Google Ads fields. |
 
 ### mutate
 
