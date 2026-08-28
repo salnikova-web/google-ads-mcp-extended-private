@@ -91,7 +91,8 @@ def campaign_create(
     Optional tracking_url_template / final_url_suffix set UTM tracking at
     creation (recommended for web funnels). NOTE: the campaign is
     created with ACCOUNT-DEFAULT conversion goals — attach the product's
-    custom goal with campaign_set_custom_conversion_goal right after.
+    custom goal with mutate_campaign_set_custom_conversion_goal right
+    after.
 
     SAFETY: dry-run by default (validate_only); re-run with confirm=true.
     Created PAUSED by default.

@@ -14,11 +14,16 @@
 
 """Tests for tool schema correctness and type safety."""
 
+import ast
+import inspect
+import pathlib
+import re
 import unittest
 from unittest.mock import patch
 
 from fastmcp import FastMCP
 
+import ads_mcp.tools
 from ads_mcp.config import ToolsConfig
 from ads_mcp.coordinator import initialize_and_mount_tools, mcp
 
@@ -146,3 +151,165 @@ class TestEnumSchemaAdvertisement(unittest.IsolatedAsyncioTestCase):
             "match_type"
         ]
         self.assertEqual(match_type["enum"], ["EXACT", "PHRASE", "BROAD"])
+
+
+class TestDocstringBodyReachesTheDescription(unittest.IsolatedAsyncioTestCase):
+    """Everything before Args: must survive into the tool description.
+
+    FastMCP's Google-style docstring parser treats "LABEL:" followed by an
+    INDENTED block as a section and silently drops it, so a docstring
+    written as::
+
+        WHEN TO USE: something
+          continued, indented
+
+    renders as nothing but its summary line — the safety text is gone from
+    tools/list with no error anywhere. Continuation lines therefore stay at
+    the docstring's own indent, and this test fails if anyone re-indents
+    them.
+    """
+
+    _STOP = ("Args:", "Returns:", "Raises:", "Yields:")
+
+    @classmethod
+    def _source_bodies(cls):
+        """{first docstring line: body} for every tool function in the
+        package, read straight from source."""
+        out = {}
+        # ads_mcp.tools is a namespace package (no __init__.py), so
+        # __file__ is None and __path__ is what locates it.
+        tools_dir = pathlib.Path(list(ads_mcp.tools.__path__)[0])
+        for path in sorted(tools_dir.glob("*.py")):
+            tree = ast.parse(path.read_text())
+            for node in tree.body:
+                if not isinstance(
+                    node, (ast.FunctionDef, ast.AsyncFunctionDef)
+                ):
+                    continue
+                raw = ast.get_docstring(node, clean=False)
+                if not raw:
+                    continue
+                lines = []
+                for line in inspect.cleandoc(raw).splitlines():
+                    if line.strip() in cls._STOP:
+                        break
+                    lines.append(line)
+                body = "\n".join(lines).strip()
+                if body:
+                    out.setdefault(body.splitlines()[0].strip(), body)
+        return out
+
+    @patch("ads_mcp.config.ToolsConfig.load")
+    async def test_no_section_is_swallowed_by_the_parser(self, mock_load):
+        mock_load.return_value = ToolsConfig({})
+        parent = FastMCP("Test Parent")
+        initialize_and_mount_tools(parent)
+
+        bodies = self._source_bodies()
+        truncated = []
+        checked = 0
+        for tool in await parent.list_tools():
+            description = (tool.description or "").strip()
+            if not description:
+                continue
+            body = bodies.get(description.splitlines()[0].strip())
+            if body is None:
+                continue
+            checked += 1
+            # The parser reflows whitespace, so compare lengths rather than
+            # demanding an exact match.
+            if len(description) < len(body) * 0.85:
+                truncated.append((tool.name, len(body), len(description)))
+        self.assertGreater(checked, 50, "the scan matched almost no tools")
+        self.assertEqual(
+            truncated,
+            [],
+            "docstring text never reached tools/list — un-indent the "
+            f"continuation lines (tool, source, rendered): {truncated}",
+        )
+
+
+class TestCrossToolReferencesArePrefixed(unittest.IsolatedAsyncioTestCase):
+    """A tool named inside another tool's text must be callable as written.
+
+    Descriptions used to name tools by their bare function name
+    (``geo_lookup``, ``list_campaigns``), which is NOT what tools/list
+    exposes — the namespace prefix is added at mount time, so an agent
+    following the text calls a tool that does not exist. One name
+    (``ad_group_ad_update_asset_optimization``) never existed at all.
+
+    Deliberately cheap: it pins the bare names that were actually wrong
+    rather than every possible one, so prose like "search on resource
+    campaign" does not have to be rewritten to satisfy it.
+    """
+
+    # bare name -> the prefixed name it must be written as.
+    KNOWN_BAD = {
+        "geo_lookup": "targeting_geo_lookup",
+        "list_campaigns": "mutate_list_campaigns",
+        "list_criteria": "targeting_list_criteria",
+        "remove_criterion": "targeting_remove_criterion",
+        "set_locations": "targeting_set_locations",
+        "list_campaign_assets": "extensions_list_campaign_assets",
+        "recommendations_list": "optimize_recommendations_list",
+        "experiments_list": "experiments_experiments_list",
+        "campaign_set_custom_conversion_goal": (
+            "mutate_campaign_set_custom_conversion_goal"
+        ),
+        "audience_attach": "demandgen_audience_attach",
+        "asset_upload_image": "demandgen_asset_upload_image",
+        "asset_create_youtube_video": "demandgen_asset_create_youtube_video",
+        "ad_group_update_channels": "demandgen_ad_group_update_channels",
+    }
+
+    # Never existed under any prefix: the real tool is
+    # demandgen_ad_update_asset_optimization.
+    NONEXISTENT = "ad_group_ad_update_asset_optimization"
+
+    _TOKEN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+    @staticmethod
+    def _texts(tool):
+        """Every string of the tool that an agent reads: description +
+        per-parameter descriptions."""
+        yield tool.description or ""
+        properties = (tool.parameters or {}).get("properties", {})
+        for schema in properties.values():
+            if isinstance(schema, dict) and schema.get("description"):
+                yield schema["description"]
+
+    @patch("ads_mcp.config.ToolsConfig.load")
+    async def test_no_bare_or_nonexistent_tool_names(self, mock_load):
+        # No "namespaces" key at all means every namespace is mounted, so
+        # the scan covers the whole exposed surface.
+        mock_load.return_value = ToolsConfig({})
+        parent = FastMCP("Test Parent")
+        initialize_and_mount_tools(parent)
+
+        tools = await parent.list_tools()
+        self.assertGreater(len(tools), 0, "no tools mounted")
+        real_names = {tool.name for tool in tools}
+        for prefixed in self.KNOWN_BAD.values():
+            self.assertIn(prefixed, real_names)
+        self.assertNotIn(self.NONEXISTENT, real_names)
+
+        offenders = []
+        for tool in tools:
+            for text in self._texts(tool):
+                if self.NONEXISTENT in text:
+                    offenders.append(
+                        (tool.name, self.NONEXISTENT, "(no such tool)")
+                    )
+                # Whole-token match: a prefixed name is a single token, so
+                # "targeting_geo_lookup" never trips the "geo_lookup" rule.
+                for token in set(self._TOKEN.findall(text)):
+                    if token in self.KNOWN_BAD:
+                        offenders.append(
+                            (tool.name, token, self.KNOWN_BAD[token])
+                        )
+        self.assertEqual(
+            offenders,
+            [],
+            "tool text names tools that cannot be called as written "
+            f"(tool, written, should be): {offenders}",
+        )

@@ -263,12 +263,14 @@ def campaign_create(
     Optional tracking_url_template / final_url_suffix set UTM tracking at
     creation (recommended for web funnels). NOTE: the campaign is
     created with ACCOUNT-DEFAULT conversion goals — attach the product's
-    custom goal with campaign_set_custom_conversion_goal right after.
+    custom goal with mutate_campaign_set_custom_conversion_goal right
+    after.
 
     Demand Gen serves across YouTube (in-feed, Shorts, in-stream), Discover
     and Gmail. Note: channel controls are set per AD GROUP, not on the
-    campaign — restrict placements with ad_group_create(channels=...) or
-    ad_group_update_channels.
+    campaign — restrict placements with
+    demandgen_ad_group_create(channels=...) or
+    demandgen_ad_group_update_channels.
 
     SAFETY: dry-run by default (validate_only); re-run with confirm=true.
     Created PAUSED unless status="ENABLED".
@@ -541,8 +543,8 @@ def ad_group_create(
     """Creates an ad group inside a Demand Gen campaign, optionally with
     channel controls (placement selection).
 
-    Attach audiences afterwards with audience_attach. SAFETY: dry-run by
-    default (validate_only); re-run with confirm=true.
+    Attach audiences afterwards with demandgen_audience_attach.
+    SAFETY: dry-run by default (validate_only); re-run with confirm=true.
 
     Args:
         customer_id: The client account id (digits only, no hyphens).
@@ -712,7 +714,7 @@ def audience_attach(
 ) -> Dict[str, Any]:
     """Attaches an existing Audience to an ad group as targeting.
 
-    Find audience ids via search on resource `audience` (fields:
+    Find audience ids via search_search on resource `audience` (fields:
     audience.id, audience.name). SAFETY: dry-run by default; re-run with
     confirm=true.
 
@@ -777,9 +779,9 @@ def ad_create_image(
 ) -> Dict[str, Any]:
     """Creates a Demand Gen image ad (multi-asset).
 
-    Upload images first with asset_upload_image (landscape 1200x628, square
-    1200x1200, logo 1200x1200) and pass their asset ids. SAFETY: dry-run by
-    default (validate_only); re-run with confirm=true.
+    Upload images first with demandgen_asset_upload_image (landscape
+    1200x628, square 1200x1200, logo 1200x1200) and pass their asset ids.
+    SAFETY: dry-run by default (validate_only); re-run with confirm=true.
 
     Args:
         customer_id: The client account id (digits only, no hyphens).
@@ -911,9 +913,9 @@ def ad_create_video(
     confirm=true — so the dry-run validates the ad payload WITHOUT the CTA
     asset link and does not fully cover what gets applied.
 
-    Register videos first with asset_create_youtube_video and pass their
-    asset ids. SAFETY: dry-run by default (validate_only); re-run with
-    confirm=true.
+    Register videos first with demandgen_asset_create_youtube_video and
+    pass their asset ids. SAFETY: dry-run by default (validate_only);
+    re-run with confirm=true.
 
     Args:
         customer_id: The client account id (digits only, no hyphens).

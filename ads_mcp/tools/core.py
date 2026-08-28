@@ -25,10 +25,18 @@ customers_mcp = FastMCP("customers")
 
 @customers_mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
 def list_accessible_customers() -> List[str]:
-    """Returns ids of customers directly accessible by the user authenticating the call.
+    """List the customer ids DIRECTLY accessible to the authenticating user.
 
-    Use this tool first to discover available customer IDs if the user hasn't
-    provided one. Most other tools require a valid customer ID as input.
+    WHEN TO USE: first, when no customer id was given — most other tools
+    need one. It returns ids only; resolve names with search_search on
+    resource customer (customer.descriptive_name).
+    ABSENCE IS NOT NO ACCESS: an account missing here can still be reachable
+    THROUGH A MANAGER (MCC). Enumerate those with search_search on
+    resource customer_client against the manager's id, and set
+    GOOGLE_ADS_LOGIN_CUSTOMER_ID to that manager to authorise calls on
+    the child.
+    UNITS & IDS: ids come back digits only, no hyphens — pass them on
+    exactly as returned.
 
     Returns:
         List[str]: A list of customer IDs.

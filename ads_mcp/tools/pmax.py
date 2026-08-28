@@ -117,7 +117,8 @@ def campaign_create(
     Optional tracking_url_template / final_url_suffix set UTM tracking at
     creation (recommended for web funnels). NOTE: the campaign is
     created with ACCOUNT-DEFAULT conversion goals — attach the product's
-    custom goal with campaign_set_custom_conversion_goal right after.
+    custom goal with mutate_campaign_set_custom_conversion_goal right
+    after.
 
     NOTE: accounts with Brand Guidelines enabled (Google default since 2025)
     REQUIRE business_name and logo_asset_id (square logo, upload first via
@@ -859,8 +860,8 @@ def signal_attach(
     """Adds an audience signal OR a search theme to a PMax asset group.
 
     Pass exactly one of audience_id / search_theme. Find audience ids via
-    search on resource `audience`. SAFETY: dry-run by default; re-run with
-    confirm=true.
+    search_search on resource `audience`. SAFETY: dry-run by default;
+    re-run with confirm=true.
 
     Args:
         customer_id: The client account id (digits only, no hyphens).

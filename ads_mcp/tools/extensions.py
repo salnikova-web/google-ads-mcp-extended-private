@@ -70,19 +70,25 @@ def add_sitelinks(
     sitelinks: List[Dict[str, str]],
     confirm: bool = False,
 ) -> Dict[str, Any]:
-    """Adds sitelink extensions to a campaign.
+    """Create sitelink assets and link them to a campaign.
 
-    SAFETY: dry-run by default (validate_only); re-run with confirm=true.
+    WHEN TO USE: new sitelinks. To reuse one that already exists in the
+    account: extensions_attach_assets (no duplicate asset).
+    PRECONDITIONS: the campaign must exist and holds at most 20 sitelinks;
+    text and description lengths are checked locally first.
+    SIDE EFFECTS: creates one asset per sitelink AND links each to the
+    campaign, atomically. Google SHOWS sitelinks only from 2 up.
+    DRY-RUN: confirm=false (default) validates remotely, changes nothing;
+    confirm=true applies.
 
     Args:
         customer_id: The client account id (digits only, no hyphens).
         campaign_id: The numeric id of the campaign.
-        sitelinks: List of 2-20 dicts, each:
-            {"text": "Pricing" (max 25 chars, required),
+        sitelinks: Objects shaped
+            {"text": "Pricing" (required, max 25 chars),
              "final_url": "https://..." (required),
-             "description1": "..." (max 35, optional),
-             "description2": "..." (max 35, optional)}.
-            Google shows sitelinks only when a campaign has at least 2.
+             "description1": "..." (optional, max 35),
+             "description2": "..." (optional, max 35)}.
         confirm: False = dry-run preview (default), True = apply.
     """
     customer_id = _clean_customer_id(customer_id)
@@ -137,9 +143,16 @@ def add_callouts(
     texts: List[str],
     confirm: bool = False,
 ) -> Dict[str, Any]:
-    """Adds callout extensions (short USP phrases) to a campaign.
+    """Create callout assets (short USP phrases) and link them.
 
-    SAFETY: dry-run by default (validate_only); re-run with confirm=true.
+    WHEN TO USE: new callouts. To reuse existing ones:
+    extensions_attach_assets.
+    PRECONDITIONS: the campaign must exist; the 25-char limit is checked
+    locally first.
+    SIDE EFFECTS: creates one asset per phrase AND links each to the
+    campaign, atomically. Callouts are not clickable and carry no URL.
+    DRY-RUN: confirm=false (default) validates remotely, changes nothing;
+    confirm=true applies.
 
     Args:
         customer_id: The client account id (digits only, no hyphens).
@@ -191,17 +204,25 @@ def add_structured_snippets(
     values: List[str],
     confirm: bool = False,
 ) -> Dict[str, Any]:
-    """Adds a structured snippet extension to a campaign.
+    """Create ONE structured snippet asset and link it to a campaign.
 
-    SAFETY: dry-run by default (validate_only); re-run with confirm=true.
+    WHEN TO USE: listing variants of one thing under a Google header
+    ("Services: X, Y, Z"). One call = one header.
+    PRECONDITIONS: the campaign must exist; header must be a Google
+    predefined header in the ACCOUNT language, and 3-10 values of max 25
+    chars are checked locally.
+    SIDE EFFECTS: creates one asset AND links it to the campaign,
+    atomically.
+    DRY-RUN: confirm=false (default) validates remotely, changes nothing;
+    confirm=true applies.
 
     Args:
         customer_id: The client account id (digits only, no hyphens).
         campaign_id: The numeric id of the campaign.
-        header: One of Google's predefined headers, in the account language
-            (e.g. English: Amenities, Brands, Courses, Degree programs,
-            Destinations, Featured hotels, Insurance coverage, Models,
-            Neighborhoods, Service catalog, Services, Shows, Styles, Types).
+        header: A Google-predefined header in the account language (English:
+            Amenities, Brands, Courses, Degree programs, Destinations,
+            Featured hotels, Insurance coverage, Models, Neighborhoods,
+            Service catalog, Services, Shows, Styles, Types).
         values: 3-10 values, max 25 chars each.
         confirm: False = dry-run preview (default), True = apply.
     """
@@ -247,13 +268,27 @@ def attach_assets(
     field_type: str,
     confirm: bool = False,
 ) -> Dict[str, Any]:
-    """Links EXISTING assets (by id) to a campaign.
+    """Link EXISTING assets (by id) to a campaign.
 
-    Use when cloning a campaign: attaches the same asset the source
-    campaign uses instead of creating a duplicate. field_type: SITELINK,
-    CALLOUT, STRUCTURED_SNIPPET, BUSINESS_NAME, BUSINESS_LOGO, AD_IMAGE.
+    WHEN TO USE: cloning a campaign — reuse the source asset instead of
+    duplicating it. New extensions: extensions_add_sitelinks,
+    extensions_add_callouts, extensions_add_structured_snippets.
+    PRECONDITIONS: the assets must exist in the SAME account (ids from
+    extensions_list_campaign_assets) and field_type must match what the
+    asset is.
+    SIDE EFFECTS: links only, creates nothing. The asset stays SHARED, so
+    editing it later changes every campaign linked to it.
+    DRY-RUN: confirm=false (default) validates remotely, changes nothing;
+    confirm=true applies.
+    UNITS & IDS: asset_ids are numeric asset ids, not resource names.
 
-    SAFETY: dry-run by default (validate_only); re-run with confirm=true.
+    Args:
+        customer_id: The client account id (digits only, no hyphens).
+        campaign_id: The numeric id of the campaign.
+        asset_ids: Numeric ids of assets already in the account.
+        field_type: SITELINK, CALLOUT, STRUCTURED_SNIPPET, BUSINESS_NAME,
+            BUSINESS_LOGO, AD_IMAGE, LOGO or LANDSCAPE_LOGO.
+        confirm: False = dry-run preview (default), True = apply.
     """
     customer_id = _clean_customer_id(customer_id)
     field_type = field_type.upper()
@@ -306,10 +341,17 @@ def remove_campaign_asset(
     field_type: str,
     confirm: bool = False,
 ) -> Dict[str, Any]:
-    """Unlinks an extension asset from a campaign (asset itself is kept).
+    """Unlink ONE extension asset from a campaign.
 
-    Find asset ids with list_campaign_assets. SAFETY: dry-run by default;
-    re-run with confirm=true.
+    WHEN TO USE: taking an extension off a campaign; the asset is KEPT and
+    stays linked to any other campaign using it.
+    PRECONDITIONS: asset_id and field_type from
+    extensions_list_campaign_assets — the link is addressed
+    campaignId~assetId~fieldType, so a wrong field_type finds nothing.
+    SIDE EFFECTS: removes the link only; re-link with
+    extensions_attach_assets.
+    DRY-RUN: confirm=false (default) validates remotely, changes nothing;
+    confirm=true applies.
 
     Args:
         customer_id: The client account id (digits only, no hyphens).
@@ -363,9 +405,12 @@ def list_campaign_assets(
     campaign_id: str,
     limit: int = 200,
 ) -> Dict[str, Any]:
-    """Lists extension assets linked to a campaign (sitelinks, callouts,
-    snippets) with asset ids needed for removal.
+    """List sitelink/callout/snippet assets linked to a campaign.
 
+    WHEN TO USE: to get the asset ids needed by
+    extensions_remove_campaign_asset, or to copy a campaign's extensions
+    onto another with extensions_attach_assets. Only SITELINK, CALLOUT
+    and STRUCTURED_SNIPPET links are returned, REMOVED ones excluded.
     Returns {"items": [...], "returned": n, "truncated": bool}. When
     truncated is true the campaign has more linked assets than limit, so an
     asset missing from items means "not listed", NOT "not linked" — raise

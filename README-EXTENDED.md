@@ -208,7 +208,7 @@ Cross-cutting parameters shared by several tools:
 
 | Tool | Description |
 |---|---|
-| `video_campaign_create` | Video campaign (YouTube) plus budget. |
+| `video_campaign_create` | ALWAYS FAILS: video campaigns cannot be created via the API — use `demandgen_campaign_create` instead. |
 | `video_ad_group_create` | VIDEO_RESPONSIVE ad group. |
 | `video_ad_create_responsive` | Responsive video ad (YouTube video + texts). |
 

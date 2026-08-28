@@ -966,6 +966,97 @@ class TestNoApiDryRuns(WriteToolTestCase):
                 self.assertEqual(self.service.mock_calls, [])
 
 
+class TestConversionGoalDryRunsAreHonest(WriteToolTestCase):
+    """The conversion-goal tools mutate in two steps and only the first one
+    round-trips on a dry-run.
+
+    ``goal_config_level`` is sent with validate_only, but the per-category
+    goal flips are built and then dropped when confirm is false — they are
+    only sent on apply. The preview used to claim the whole operation had
+    been "validated by Google Ads (validate_only=true)", which is exactly
+    the part that was never sent.
+    """
+
+    CALLS = [
+        (
+            mutate.campaign_set_conversion_goals,
+            ("1234567890", "222", ["PURCHASE"]),
+        ),
+        (
+            mutate.campaign_set_custom_conversion_goal,
+            ("1234567890", "222", "999"),
+        ),
+    ]
+
+    def setUp(self):
+        super().setUp()
+        # A goal row that is biddable but not wanted, so both tools find
+        # something to flip and the local diff is non-empty.
+        self.service.search.return_value = [
+            SimpleNamespace(
+                campaign_conversion_goal=SimpleNamespace(
+                    resource_name=(
+                        "customers/1234567890/campaignConversionGoals/222~1"
+                    ),
+                    category=SimpleNamespace(name="ADD_TO_CART"),
+                    origin=SimpleNamespace(name="WEBSITE"),
+                    biddable=True,
+                )
+            )
+        ]
+
+    def test_dry_run_does_not_claim_the_flips_were_validated(self):
+        for fn, args in self.CALLS:
+            with self.subTest(tool=fn.__name__):
+                result = fn(*args)
+                self.assertIs(result["applied"], False)
+                self.assertIs(result["validated"], False)
+                self.assertNotIn("validated by Google Ads", result["note"])
+                self.assertIn("goal-config-level switch", result["note"])
+                self.assertEqual(
+                    result["validation"],
+                    {
+                        "goal_config_level": (
+                            "validated remotely (validate_only=true)"
+                        ),
+                        "category_goal_flips": (
+                            "previewed locally, NOT sent to Google Ads"
+                        ),
+                    },
+                )
+
+    def test_dry_run_never_sends_the_goal_flips(self):
+        for fn, args in self.CALLS:
+            with self.subTest(tool=fn.__name__):
+                self.service.reset_mock(return_value=False)
+                fn(*args)
+                # Step 1 is sent (validate_only); step 2 is not sent at all.
+                config_call = (
+                    self.service.mutate_conversion_goal_campaign_configs
+                )
+                self.assertEqual(config_call.call_count, 1)
+                self.assertIs(
+                    config_call.call_args.kwargs["request"].validate_only,
+                    True,
+                )
+                self.service.mutate_campaign_conversion_goals.assert_not_called()
+
+    def test_apply_sends_both_steps(self):
+        for fn, args in self.CALLS:
+            with self.subTest(tool=fn.__name__):
+                self.service.reset_mock(return_value=False)
+                result = fn(*args, confirm=True)
+                self.assertIs(result["applied"], True)
+                self.assertNotIn("validated", result)
+                self.assertIs(
+                    self.service.mutate_conversion_goal_campaign_configs.call_args.kwargs[
+                        "request"
+                    ].validate_only,
+                    False,
+                )
+                self.service.mutate_campaign_conversion_goals.assert_called_once()
+
+
 class TestGaqlReadErrorsAreTranslated(WriteToolTestCase):
     """A GoogleAdsException from a GAQL read used to escape these tools as
     a raw exception instead of the module's formatted ToolError, because

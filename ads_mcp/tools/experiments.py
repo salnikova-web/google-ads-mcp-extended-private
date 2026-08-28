@@ -3,10 +3,10 @@
 
 """Campaign experiments (A/B tests).
 
-Flow: experiment_create (makes experiment + control/treatment arms and
-schedules it — Google copies the control campaign into a treatment
+Flow: experiments_experiment_create (makes experiment + control/treatment
+arms and schedules it — Google copies the control campaign into a treatment
 campaign) -> edit the treatment campaign with the regular tools ->
-experiment_end or experiment_promote.
+experiments_experiment_end or experiments_experiment_promote.
 
 Safety model: ``confirm=False`` = preview only (experiment scheduling has
 side effects that validate_only cannot fully cover, so nothing is sent to
@@ -49,7 +49,8 @@ def experiment_create(
 
     Google copies the control campaign into a treatment campaign and splits
     traffic. After creation, modify the treatment campaign with the regular
-    tools (find its id via experiments_list), then end or promote.
+    tools (find its id via experiments_experiments_list), then end or
+    promote.
 
     SAFETY: with confirm=false nothing is sent to Google Ads, so the preview
     is computed locally and nothing is validated.
@@ -141,8 +142,8 @@ def experiment_create(
     preview["experiment_resource"] = experiment_rn
     preview["note"] = (
         "Scheduled. Google is creating the treatment campaign (may take a "
-        "few minutes). Use experiments_list to see it, then edit the "
-        "treatment campaign with the regular tools."
+        "few minutes). Use experiments_experiments_list to see it, then "
+        "edit the treatment campaign with the regular tools."
     )
     return _preview_or_done(True, "experiments_create", preview)
 

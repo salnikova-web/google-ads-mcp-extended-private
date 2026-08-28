@@ -15,8 +15,8 @@
 """Standard Shopping campaign tools (write extension).
 
 Requires a Google Merchant Center account linked to the Google Ads account.
-Workflow: campaign_create -> ad_group_create -> ad_create_product ->
-ad_group_set_all_products.
+Workflow: shopping_campaign_create -> shopping_ad_group_create ->
+shopping_ad_create_product -> shopping_ad_group_set_all_products.
 
 Safety model: identical to ads_mcp.tools.mutate — every write tool accepts
 ``confirm`` (default ``False`` = validate_only dry-run preview).
@@ -86,7 +86,8 @@ def campaign_create(
     Optional tracking_url_template / final_url_suffix set UTM tracking at
     creation (recommended for web funnels). NOTE: the campaign is
     created with ACCOUNT-DEFAULT conversion goals — attach the product's
-    custom goal with campaign_set_custom_conversion_goal right after.
+    custom goal with mutate_campaign_set_custom_conversion_goal right
+    after.
 
     Requires a linked Merchant Center account. SAFETY: dry-run by default
     (validate_only); re-run with confirm=true. Created PAUSED by default.

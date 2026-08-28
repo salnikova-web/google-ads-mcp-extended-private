@@ -121,8 +121,6 @@ python -m unittest tests.tools.mutate_test.КЛАС.тест   # один тес
 
 ## Відомі хвости (не «лагодити» мимохідь, окремі задачі)
 
-- Stale docstring `mutate.py:166–168`: каже, що PMax asset groups не
-  підтримуються — неправда, є неймспейс `pmax`.
 - Бандл-скіл `ads_mcp/skills/account-performance-diagnostics/` не пакується
   (MANIFEST.in без `.md`) і має 2 дефекти: `metrics.conversion_value` →
   правильно `conversions_value`; непрефіксовані імена інструментів
