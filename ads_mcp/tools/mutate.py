@@ -21,15 +21,19 @@ Safety model: every tool accepts a ``confirm`` flag (default ``False``).
 With ``confirm=False`` the request is sent with ``validate_only=True`` —
 Google Ads fully validates the operation but changes nothing, and the tool
 returns a preview. Call the tool again with ``confirm=True`` to apply.
+Each preview reports what really happened in ``validated``: the two
+conversion-goal tools validate only their first step remotely, and a few
+tools elsewhere have no ``validate_only`` at all.
 """
 
 import math
 import time
-from typing import Any, Dict, List, Optional
+from typing import Annotated, Any, Dict, List, Optional
 
 from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
 from mcp.types import ToolAnnotations
+from pydantic import Field
 from google.ads.googleads.errors import GoogleAdsException
 from google.api_core import protobuf_helpers
 
@@ -55,6 +59,21 @@ _NO_RESULT_ERROR = (
 
 _WRITE_ANNOTATIONS = ToolAnnotations(readOnlyHint=False, destructiveHint=False)
 
+# The two conversion-goal tools mutate in two steps: the goal-config-level
+# switch is sent with validate_only, the per-category goal flips are not
+# sent at all on a dry-run. Neither canned note in _preview_or_done fits, so
+# both tools report the split explicitly.
+_GOAL_FLIP_DRY_RUN_NOTE = (
+    "DRY-RUN: only the goal-config-level switch was sent to Google Ads for "
+    "validation (validate_only=true). The per-category conversion-goal "
+    "flips were computed locally and NOT sent, so they are unvalidated and "
+    "can still fail. Re-run the tool with confirm=true to apply."
+)
+_GOAL_FLIP_VALIDATION = {
+    "goal_config_level": "validated remotely (validate_only=true)",
+    "category_goal_flips": "previewed locally, NOT sent to Google Ads",
+}
+
 _ALLOWED_CHANNEL_TYPES = [
     "SEARCH",
     "DISPLAY",
@@ -72,6 +91,23 @@ _ALLOWED_BIDDING = [
 ]
 
 _ALLOWED_CAMPAIGN_STATUSES = ["ENABLED", "PAUSED", "REMOVED"]
+
+# Schema-only aliases: advertise the accepted values in tools/list via
+# json_schema_extra while runtime validation stays the existing lax
+# .upper() + explicit ToolError checks below (a true Literal would reject
+# lowercase input that works today).
+_CHANNEL_TYPE_ENUM = Annotated[
+    str, Field(json_schema_extra={"enum": _ALLOWED_CHANNEL_TYPES})
+]
+_BIDDING_ENUM = Annotated[
+    str, Field(json_schema_extra={"enum": _ALLOWED_BIDDING})
+]
+_STATUS_ENUM = Annotated[
+    str, Field(json_schema_extra={"enum": ["PAUSED", "ENABLED"]})
+]
+_MATCH_TYPE_ENUM = Annotated[
+    str, Field(json_schema_extra={"enum": ["EXACT", "PHRASE", "BROAD"]})
+]
 
 
 # Kept under this name: 12 write modules import it from here.
@@ -97,6 +133,7 @@ def _preview_or_done(
     action: str,
     details: Dict[str, Any],
     validated: bool = True,
+    note: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Builds the applied/dry-run result envelope.
 
@@ -109,21 +146,28 @@ def _preview_or_done(
             confirm is false, so the preview does not claim a validation that
             never happened. ``details`` is merged first, so this flag always
             wins over a stray key of the same name.
+        note: Replaces the standard dry-run note. Only for tools whose
+            dry-run is neither "fully validated" nor "nothing sent" — a
+            multi-step tool that validates one step and previews the rest
+            locally, where both canned notes would be wrong. Ignored when
+            confirm is true.
     """
     if confirm:
         return {**details, "applied": True, "action": action}
-    if validated:
-        note = (
-            "DRY-RUN: the operation was validated by Google Ads "
-            "(validate_only=true) but NOT applied. Re-run the tool with "
-            "confirm=true to apply it."
-        )
-    else:
-        note = (
-            "DRY-RUN: this preview was computed locally. Nothing was sent to "
-            "Google Ads, so nothing was validated and the operation may still "
-            "fail when applied. Re-run the tool with confirm=true to apply it."
-        )
+    if note is None:
+        if validated:
+            note = (
+                "DRY-RUN: the operation was validated by Google Ads "
+                "(validate_only=true) but NOT applied. Re-run the tool with "
+                "confirm=true to apply it."
+            )
+        else:
+            note = (
+                "DRY-RUN: this preview was computed locally. Nothing was sent "
+                "to Google Ads, so nothing was validated and the operation "
+                "may still fail when applied. Re-run the tool with "
+                "confirm=true to apply it."
+            )
     return {
         **details,
         "applied": False,
@@ -181,50 +225,50 @@ def campaign_create(
     customer_id: str,
     name: str,
     daily_budget: float,
-    channel_type: str = "SEARCH",
-    bidding_strategy: str = "MAXIMIZE_CONVERSIONS",
+    channel_type: _CHANNEL_TYPE_ENUM = "SEARCH",
+    bidding_strategy: _BIDDING_ENUM = "MAXIMIZE_CONVERSIONS",
     target_cpa: Optional[float] = None,
     target_roas: Optional[float] = None,
     tracking_url_template: Optional[str] = None,
     final_url_suffix: Optional[str] = None,
-    status: str = "PAUSED",
+    status: _STATUS_ENUM = "PAUSED",
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
     confirm: bool = False,
 ) -> Dict[str, Any]:
-    """Creates a new campaign together with a dedicated daily budget.
+    """Create a campaign together with its own dedicated daily budget.
 
-    Optional tracking_url_template / final_url_suffix set UTM tracking at
-    creation (recommended for web funnels). NOTE: the campaign is
-    created with ACCOUNT-DEFAULT conversion goals — attach the product's
-    custom goal with campaign_set_custom_conversion_goal right after.
-
-    SAFETY: by default runs in DRY-RUN mode (validate_only). Google Ads fully
-    validates the request without creating anything. Re-run with confirm=true
-    to actually create the campaign. New campaigns are created PAUSED unless
-    status="ENABLED" is passed explicitly.
+    WHEN TO USE: Search. Other channels: pmax_campaign_create,
+    demandgen_campaign_create, shopping_campaign_create,
+    display_campaign_create.
+    PRECONDITIONS: the name must be free — check mutate_list_campaigns (a
+    truncated list is not proof).
+    SIDE EFFECTS: creates a budget AND a campaign, PAUSED unless
+    status="ENABLED", on ACCOUNT-DEFAULT conversion goals — follow up
+    with mutate_campaign_set_custom_conversion_goal.
+    DRY-RUN: confirm=false (default) validates remotely, changes nothing;
+    confirm=true applies.
+    UNITS & IDS: money in account currency (micros internally).
 
     Args:
         customer_id: The client account id (digits only, no hyphens).
         name: Campaign name (must be unique within the account).
-        daily_budget: Daily budget in the account currency (e.g. 50.0 = €50
-            for EUR accounts). Converted to micros automatically.
-        channel_type: One of SEARCH, DISPLAY, SHOPPING, VIDEO,
-            PERFORMANCE_MAX, DEMAND_GEN. Note: PERFORMANCE_MAX campaigns also
-            require asset groups, which are not yet supported here — create
-            the campaign PAUSED and finish setup in the UI.
-        bidding_strategy: One of MAXIMIZE_CONVERSIONS,
-            MAXIMIZE_CONVERSION_VALUE, MAXIMIZE_CLICKS, MANUAL_CPC.
-        target_cpa: Optional target CPA in account currency
-            (only with MAXIMIZE_CONVERSIONS).
-        target_roas: Optional target ROAS as a decimal, e.g. 3.5 = 350%
-            (only with MAXIMIZE_CONVERSION_VALUE).
-        status: PAUSED (default, recommended) or ENABLED.
+        daily_budget: Daily budget in account currency (50.0 = €50).
+        channel_type: Advertising channel. For PERFORMANCE_MAX prefer
+            pmax_campaign_create (merchant feed + PMax bidding); asset
+            groups come from pmax_asset_group_create.
+        bidding_strategy: Bidding strategy of the new campaign.
+        target_cpa: Target CPA (only with MAXIMIZE_CONVERSIONS).
+        target_roas: Target ROAS as a decimal, 3.5 = 350% (only with
+            MAXIMIZE_CONVERSION_VALUE).
+        tracking_url_template: Tracking template; MUST contain {lpurl}.
+        final_url_suffix: Query string appended to final URLs, e.g.
+            "utm_source=google&utm_medium=cpc".
+        status: Status the campaign is created with.
+        start_date: "YYYY-MM-DD" (dashes required), account timezone;
+            defaults to today.
+        end_date: "YYYY-MM-DD" (dashes required), inclusive; omit for none.
         confirm: False = dry-run preview (default), True = apply changes.
-
-    Returns:
-        Dict with the result: resource names when applied, or a validated
-        preview when confirm=false.
     """
     customer_id = _clean_customer_id(customer_id)
     channel_type = channel_type.upper()
@@ -334,7 +378,7 @@ def campaign_create(
             or r.campaign_result.resource_name
             for r in response.mutate_operation_responses
         ]
-    return _preview_or_done(confirm, "campaign_create", details)
+    return _preview_or_done(confirm, "mutate_campaign_create", details)
 
 
 @mutate_mcp.tool(
@@ -346,11 +390,15 @@ def campaign_update_status(
     status: str,
     confirm: bool = False,
 ) -> Dict[str, Any]:
-    """Pauses, enables or removes a campaign.
+    """Pause, enable or remove ONE campaign.
 
-    SAFETY: by default runs in DRY-RUN mode (validate_only). Re-run with
-    confirm=true to apply. REMOVED is irreversible — a removed campaign
-    cannot be re-enabled.
+    WHEN TO USE: one campaign, or any REMOVED. Three or more taking the
+    same ENABLED/PAUSED: mutate_campaign_update_status_batch.
+    PRECONDITIONS: the campaign must exist (mutate_list_campaigns).
+    SIDE EFFECTS: serving changes at once. REMOVED is IRREVERSIBLE — a
+    removed campaign can never be re-enabled.
+    DRY-RUN: confirm=false (default) validates remotely, changes nothing;
+    confirm=true applies.
 
     Args:
         customer_id: The client account id (digits only, no hyphens).
@@ -396,39 +444,34 @@ def campaign_update_status(
     }
     if confirm:
         details["updated_resource"] = response.results[0].resource_name
-    return _preview_or_done(confirm, "campaign_update_status", details)
+    return _preview_or_done(confirm, "mutate_campaign_update_status", details)
 
 
 @mutate_mcp.tool(annotations=_WRITE_ANNOTATIONS)
 def campaign_update_status_batch(
     customer_id: str,
     campaign_ids: List[str],
-    status: str,
+    status: _STATUS_ENUM,
     confirm: bool = False,
 ) -> Dict[str, Any]:
-    """Pauses or enables SEVERAL campaigns in one request.
+    """Pause or enable SEVERAL campaigns in one request.
 
-    Use this instead of calling mutate_campaign_update_status in a loop
-    whenever three or more campaigns get the same new status: one call, one
-    preview, one approval. For a single campaign — or for REMOVED — use
-    mutate_campaign_update_status.
-
-    Only ENABLED and PAUSED are accepted here. Removing a campaign is
-    irreversible, so it stays one campaign at a time on the single-campaign
-    tool. At most 100 campaign ids per call; duplicates are dropped (kept in
-    first-seen order) and reported in the preview.
-
-    DRY-RUN vs APPLY: with confirm=false (default) the whole batch is
-    validated by Google Ads atomically (validate_only), so one bad id fails
-    the entire preview and nothing is changed. With confirm=true the batch is
-    applied with partial_failure=true, so some campaigns can succeed while
-    others fail — the result reports requested/succeeded/failed counts plus a
-    per-campaign breakdown.
+    WHEN TO USE: three or more campaigns taking the same new status — one
+    call, one approval. One campaign, or REMOVED (irreversible, refused
+    here): mutate_campaign_update_status.
+    PRECONDITIONS: ids must exist (mutate_list_campaigns). At most 100 per
+    call; duplicates are dropped (first-seen order) and reported.
+    SIDE EFFECTS: sets status on every listed campaign, nothing else.
+    DRY-RUN: confirm=false (default) validates the batch remotely and
+    ATOMICALLY, so one bad id fails the whole preview. confirm=true
+    applies with partial_failure=true, so some campaigns can succeed
+    while others fail — the result reports requested/succeeded/failed
+    plus a per-campaign breakdown.
 
     Args:
         customer_id: The client account id (digits only, no hyphens).
         campaign_ids: Numeric campaign ids, up to 100.
-        status: ENABLED or PAUSED (applied to every listed campaign).
+        status: Applied to every listed campaign.
         confirm: False = dry-run preview (default), True = apply changes.
     """
     customer_id = _clean_customer_id(customer_id)
@@ -530,7 +573,9 @@ def campaign_update_status_batch(
         details["failed"] = len(failed)
         details["succeeded_campaigns"] = succeeded
         details["failed_campaigns"] = failed
-    return _preview_or_done(confirm, "campaign_update_status_batch", details)
+    return _preview_or_done(
+        confirm, "mutate_campaign_update_status_batch", details
+    )
 
 
 @mutate_mcp.tool(annotations=_WRITE_ANNOTATIONS)
@@ -540,12 +585,22 @@ def campaign_set_target_roas(
     target_roas: float,
     confirm: bool = False,
 ) -> Dict[str, Any]:
-    """Sets Target ROAS on a Maximize Conversion Value campaign.
+    """Set Target ROAS on a Maximize Conversion Value campaign.
 
-    Use after creation for Standard Shopping (tROAS is often not accepted
-    at create time). target_roas is a decimal, e.g. 1.7 = 170%.
+    WHEN TO USE: after creation, above all Standard Shopping (tROAS is
+    often refused at create time). PMax: pmax_campaign_update_bidding.
+    PRECONDITIONS: the campaign must already bid on
+    MAXIMIZE_CONVERSION_VALUE, or the API rejects the update.
+    SIDE EFFECTS: replaces the tROAS target, no other bidding field.
+    DRY-RUN: confirm=false (default) validates remotely, changes nothing;
+    confirm=true applies.
+    UNITS & IDS: target_roas is a decimal, 1.7 = 170%.
 
-    SAFETY: dry-run by default (validate_only); re-run with confirm=true.
+    Args:
+        customer_id: The client account id (digits only, no hyphens).
+        campaign_id: The numeric id of the campaign.
+        target_roas: Target return on ad spend as a decimal.
+        confirm: False = dry-run preview (default), True = apply changes.
     """
     from google.protobuf import field_mask_pb2
 
@@ -579,7 +634,7 @@ def campaign_set_target_roas(
     }
     if confirm:
         details["updated_resource"] = response.results[0].resource_name
-    return _preview_or_done(confirm, "campaign_set_target_roas", details)
+    return _preview_or_done(confirm, "mutate_campaign_set_target_roas", details)
 
 
 @mutate_mcp.tool(annotations=_WRITE_ANNOTATIONS)
@@ -590,15 +645,24 @@ def campaign_set_merchant(
     feed_label: Optional[str] = None,
     confirm: bool = False,
 ) -> Dict[str, Any]:
-    """Links a Merchant Center feed to an existing campaign (PMax/Shopping).
+    """Link a Merchant Center feed to an existing campaign (PMax/Shopping).
 
-    NOTE: on Performance Max the Merchant Center id is often immutable
-    after creation; if the API rejects this update, the campaign must be
-    recreated with the merchant feed set at creation time
-    (pmax_campaign_create merchant_id=...).
+    WHEN TO USE: a PMax or Shopping campaign with no feed yet. On PMax the
+    Merchant Center id is often IMMUTABLE after creation — if the API
+    rejects this, recreate with pmax_campaign_create(merchant_id=...).
+    PRECONDITIONS: the Merchant Center account must already be linked to
+    the Google Ads account.
+    SIDE EFFECTS: sets merchant_id (and feed_label when given); products
+    start serving from that feed.
+    DRY-RUN: confirm=false (default) validates remotely, changes nothing;
+    confirm=true applies.
 
-    feed_label: optional country/label filter; omit to use the whole feed.
-    SAFETY: dry-run by default (validate_only); re-run with confirm=true.
+    Args:
+        customer_id: The client account id (digits only, no hyphens).
+        campaign_id: The numeric id of the campaign.
+        merchant_id: The Merchant Center account id (digits only).
+        feed_label: Country/label filter; omit to use the whole feed.
+        confirm: False = dry-run preview (default), True = apply changes.
     """
     customer_id = _clean_customer_id(customer_id)
     client = utils.get_googleads_client()
@@ -631,7 +695,7 @@ def campaign_set_merchant(
     }
     if confirm:
         details["updated_resource"] = response.results[0].resource_name
-    return _preview_or_done(confirm, "campaign_set_merchant", details)
+    return _preview_or_done(confirm, "mutate_campaign_set_merchant", details)
 
 
 @mutate_mcp.tool(annotations=_WRITE_ANNOTATIONS)
@@ -650,20 +714,37 @@ def campaign_update_settings(
     video_enhancement: Optional[bool] = None,
     confirm: bool = False,
 ) -> Dict[str, Any]:
-    """Updates campaign network settings, geo target type and/or AI Max.
+    """Update campaign network settings, geo target type and/or AI Max.
 
-    Only the passed fields are changed. target_search_network=False turns
-    OFF Google search partners. positive_geo_target_type: PRESENCE or
-    PRESENCE_OR_INTEREST. enable_ai_max toggles AI Max for Search;
-    text_customization / final_url_expansion toggle its sub-settings
-    (asset automation OPTED_IN/OPTED_OUT).
+    WHEN TO USE: network reach, geo match type, AI Max and asset
+    automation. The Demand Gen "Asset optimization" toggles are NOT
+    campaign-level — use demandgen_ad_update_asset_optimization, or set
+    them at creation via demandgen_ad_create_video.
+    PRECONDITIONS: pass at least one setting or the call is refused; the
+    asset-automation toggles first READ the campaign's current settings.
+    SIDE EFFECTS: only the fields you pass change. Turning a network off
+    can cut reach sharply.
+    DRY-RUN: confirm=false (default) validates remotely, changes nothing;
+    confirm=true applies.
 
-    NOTE: the Demand Gen "Asset optimization" toggles (shorter/resized
-    videos, landing page previews) are NOT campaign-level — they live on
-    each video ad. Use ad_group_ad_update_asset_optimization for existing
-    DG ads, or set them at creation via demandgen_ad_create_video.
-
-    SAFETY: dry-run by default (validate_only); re-run with confirm=true.
+    Args:
+        customer_id: The client account id (digits only, no hyphens).
+        campaign_id: The numeric id of the campaign.
+        target_google_search: Serve on Google search results.
+        target_search_network: Serve on search partners; False turns them
+            OFF.
+        target_content_network: Serve on the Display network.
+        positive_geo_target_type: PRESENCE (people in the location) or
+            PRESENCE_OR_INTEREST (also people interested in it).
+        enable_ai_max: Toggle AI Max for Search.
+        text_customization: AI Max sub-setting: Google may customise ad
+            text (asset automation OPTED_IN/OPTED_OUT).
+        final_url_expansion: AI Max sub-setting: Google may send traffic to
+            other pages of the site.
+        image_enhancement: Google may enhance campaign images.
+        image_extraction: Google may pull images from the landing page.
+        video_enhancement: Google may generate enhanced YouTube videos.
+        confirm: False = dry-run preview (default), True = apply changes.
     """
     customer_id = _clean_customer_id(customer_id)
 
@@ -777,7 +858,7 @@ def campaign_update_settings(
     }
     if confirm:
         details["updated_resource"] = response.results[0].resource_name
-    return _preview_or_done(confirm, "campaign_update_settings", details)
+    return _preview_or_done(confirm, "mutate_campaign_update_settings", details)
 
 
 @mutate_mcp.tool(annotations=_WRITE_ANNOTATIONS)
@@ -787,17 +868,21 @@ def campaign_rename(
     name: str,
     confirm: bool = False,
 ) -> Dict[str, Any]:
-    """Renames an existing campaign (changes campaign.name).
+    """Rename an existing campaign (changes campaign.name only).
 
-    Campaign names must be unique within the account; a duplicate name is
-    rejected by the API. The preview shows the current name and the new one.
-
-    SAFETY: dry-run by default (validate_only); re-run with confirm=true.
+    WHEN TO USE: renaming only; budget/status/settings have their own
+    mutate_campaign_* tools.
+    PRECONDITIONS: the campaign must exist (its current name is read first)
+    and the new name must be free — names are unique per account and a
+    duplicate is rejected. Check mutate_list_campaigns.
+    SIDE EFFECTS: only campaign.name changes; the preview shows old vs new.
+    DRY-RUN: confirm=false (default) validates remotely, changes nothing;
+    confirm=true applies.
 
     Args:
         customer_id: The client account id (digits only, no hyphens).
         campaign_id: The numeric id of the campaign to rename.
-        name: The new campaign name.
+        name: The new campaign name (non-empty).
         confirm: False = dry-run preview (default), True = apply.
     """
     customer_id = _clean_customer_id(customer_id)
@@ -848,7 +933,7 @@ def campaign_rename(
     }
     if confirm:
         details["updated_resource"] = response.results[0].resource_name
-    return _preview_or_done(confirm, "campaign_rename", details)
+    return _preview_or_done(confirm, "mutate_campaign_rename", details)
 
 
 @mutate_mcp.tool(annotations=_WRITE_ANNOTATIONS)
@@ -858,21 +943,23 @@ def campaign_budget_update(
     new_daily_budget: float,
     confirm: bool = False,
 ) -> Dict[str, Any]:
-    """Changes the daily budget of an existing campaign.
+    """Change the daily budget of ONE existing campaign.
 
-    Looks up the budget attached to the campaign and updates its amount.
-    SAFETY: by default runs in DRY-RUN mode (validate_only) and returns the
-    current vs new amount. Re-run with confirm=true to apply.
-
-    Note: if the budget is shared between several campaigns
-    (explicitly_shared=true), the change affects ALL campaigns using it —
-    the preview will warn about this.
+    WHEN TO USE: one campaign. Three or more:
+    mutate_campaign_budget_update_batch (one call, one approval).
+    PRECONDITIONS: the campaign must exist — its budget is resolved first
+    and an unknown id fails. Find ids with mutate_list_campaigns.
+    SIDE EFFECTS: the update lands on the BUDGET, so a shared budget
+    (explicitly_shared=true) changes every campaign on it; the preview
+    warns and shows current vs new amount.
+    DRY-RUN: confirm=false (default) validates remotely, changes nothing;
+    confirm=true applies.
+    UNITS & IDS: money in account currency (micros internally).
 
     Args:
         customer_id: The client account id (digits only, no hyphens).
         campaign_id: The numeric id of the campaign.
-        new_daily_budget: New daily budget in account currency
-            (e.g. 75.0 = €75). Converted to micros automatically.
+        new_daily_budget: New daily budget in account currency (75.0 = €75).
         confirm: False = dry-run preview (default), True = apply changes.
     """
     customer_id = _clean_customer_id(customer_id)
@@ -938,7 +1025,7 @@ def campaign_budget_update(
         )
     if confirm:
         details["updated_resource"] = response.results[0].resource_name
-    return _preview_or_done(confirm, "campaign_budget_update", details)
+    return _preview_or_done(confirm, "mutate_campaign_budget_update", details)
 
 
 @mutate_mcp.tool(annotations=_WRITE_ANNOTATIONS)
@@ -947,36 +1034,30 @@ def campaign_budget_update_batch(
     updates: List[Dict[str, Any]],
     confirm: bool = False,
 ) -> Dict[str, Any]:
-    """Changes the daily budget of SEVERAL campaigns in one request.
+    """Change the daily budget of SEVERAL campaigns in one request.
 
-    Use this instead of calling mutate_campaign_budget_update in a loop
-    whenever three or more campaigns need a new budget: one call, one
-    preview, one approval. For a single campaign use
-    mutate_campaign_budget_update.
-
-    updates is a list of objects, at most 100:
-    [{"campaign_id": "123", "new_daily_budget": 75.0}, ...]. Budgets are in
-    the account currency (75.0 = 75 EUR on a EUR account) and are converted
-    to micros automatically. Duplicate campaign_ids are rejected.
-
-    SHARED BUDGETS: the update happens on the budget, not on the campaign, so
-    a shared budget changes every campaign attached to it — each affected row
-    in the preview carries a warning. Two campaigns on the same shared budget
-    collapse into one operation when they request the same amount, and are
-    rejected when they request different amounts.
-
-    DRY-RUN vs APPLY: with confirm=false (default) every campaign id is
-    resolved first (unknown ids fail before anything is written) and the
-    batch is validated by Google Ads atomically (validate_only), so nothing
-    is changed. With confirm=true the batch is applied with
-    partial_failure=true, so some budgets can succeed while others fail — the
-    result reports requested/succeeded/failed counts plus a per-campaign
+    WHEN TO USE: three or more campaigns needing a new budget — one call,
+    one approval. One campaign: mutate_campaign_budget_update.
+    PRECONDITIONS: every id is resolved first, so an unknown id fails the
+    whole call before anything is written (mutate_list_campaigns). At
+    most 100 entries; duplicate campaign_ids are rejected.
+    SIDE EFFECTS: the update lands on the BUDGET, not the campaign, so a
+    shared budget changes every campaign on it — each affected row warns.
+    Two campaigns on one shared budget collapse into one operation at the
+    same amount, and are rejected at different amounts.
+    DRY-RUN: confirm=false (default) validates the batch remotely and
+    ATOMICALLY, so nothing changes. confirm=true applies with
+    partial_failure=true, so some budgets can succeed while others fail —
+    the result reports requested/succeeded/failed plus a per-campaign
     breakdown.
+    UNITS & IDS: money in account currency (75.0 = 75 EUR on a EUR
+    account, micros internally).
 
     Args:
         customer_id: The client account id (digits only, no hyphens).
-        updates: Up to 100 objects with "campaign_id" and a positive
-            "new_daily_budget" in account currency.
+        updates: Up to 100 objects shaped
+            {"campaign_id": "123", "new_daily_budget": 75.0}; the budget
+            must be a positive number in account currency.
         confirm: False = dry-run preview (default), True = apply changes.
     """
     customer_id = _clean_customer_id(customer_id)
@@ -1195,7 +1276,9 @@ def campaign_budget_update_batch(
         details["failed"] = len(failed)
         details["succeeded_campaigns"] = succeeded
         details["failed_campaigns"] = failed
-    return _preview_or_done(confirm, "campaign_budget_update_batch", details)
+    return _preview_or_done(
+        confirm, "mutate_campaign_budget_update_batch", details
+    )
 
 
 @mutate_mcp.tool(annotations=_WRITE_ANNOTATIONS)
@@ -1204,20 +1287,29 @@ def ad_group_create(
     campaign_id: str,
     name: str,
     cpc_bid: Optional[float] = None,
-    status: str = "PAUSED",
+    status: _STATUS_ENUM = "PAUSED",
     confirm: bool = False,
 ) -> Dict[str, Any]:
-    """Creates a new ad group (SEARCH_STANDARD) inside an existing campaign.
+    """Create a SEARCH_STANDARD ad group inside an existing campaign.
 
-    SAFETY: by default runs in DRY-RUN mode (validate_only). Re-run with
-    confirm=true to apply. Created PAUSED unless status="ENABLED".
+    WHEN TO USE: Search only. Other channels: demandgen_ad_group_create,
+    display_ad_group_create, shopping_ad_group_create,
+    video_ad_group_create; PMax has no ad groups (pmax_asset_group_create).
+    PRECONDITIONS: the parent campaign must exist
+    (mutate_list_campaigns) and the name must be free within it.
+    SIDE EFFECTS: created PAUSED unless status="ENABLED", and serves
+    nothing until mutate_keywords_add and mutate_ad_create_rsa run.
+    DRY-RUN: confirm=false (default) validates remotely, changes nothing;
+    confirm=true applies.
+    UNITS & IDS: money in account currency (micros internally).
 
     Args:
         customer_id: The client account id (digits only, no hyphens).
         campaign_id: The numeric id of the parent campaign.
         name: Ad group name (unique within the campaign).
-        cpc_bid: Optional max CPC bid in account currency (e.g. 1.5 = €1.50).
-        status: PAUSED (default) or ENABLED.
+        cpc_bid: Max CPC bid in account currency (1.5 = €1.50); ignored by
+            Smart Bidding campaigns.
+        status: Status the ad group is created with.
         confirm: False = dry-run preview (default), True = apply changes.
     """
     customer_id = _clean_customer_id(customer_id)
@@ -1256,7 +1348,7 @@ def ad_group_create(
     }
     if confirm:
         details["created_resource"] = response.results[0].resource_name
-    return _preview_or_done(confirm, "ad_group_create", details)
+    return _preview_or_done(confirm, "mutate_ad_group_create", details)
 
 
 @mutate_mcp.tool(
@@ -1270,10 +1362,17 @@ def ad_group_update(
     new_name: Optional[str] = None,
     confirm: bool = False,
 ) -> Dict[str, Any]:
-    """Updates an existing ad group: status, max CPC bid and/or name.
+    """Update an existing ad group: status, max CPC bid and/or name.
 
-    Pass only the fields you want to change. SAFETY: by default runs in
-    DRY-RUN mode (validate_only). Re-run with confirm=true to apply.
+    WHEN TO USE: any ad group. Targeting mode lives in
+    targeting_set_ad_group_target_restrictions instead.
+    PRECONDITIONS: pass at least one of status, cpc_bid, new_name — an
+    empty update is refused.
+    SIDE EFFECTS: only the fields you pass are written. status="REMOVED"
+    REMOVES the ad group and is IRREVERSIBLE.
+    DRY-RUN: confirm=false (default) validates remotely, changes nothing;
+    confirm=true applies.
+    UNITS & IDS: money in account currency (micros internally).
 
     Args:
         customer_id: The client account id (digits only, no hyphens).
@@ -1318,7 +1417,9 @@ def ad_group_update(
             details_removed["removed_resource"] = response.results[
                 0
             ].resource_name
-        return _preview_or_done(confirm, "ad_group_update", details_removed)
+        return _preview_or_done(
+            confirm, "mutate_ad_group_update", details_removed
+        )
     ad_group = operation.update
     ad_group.resource_name = f"customers/{customer_id}/adGroups/{ad_group_id}"
     # Each path is appended inside its own branch: a field the caller did
@@ -1357,7 +1458,7 @@ def ad_group_update(
     }
     if confirm:
         details["updated_resource"] = response.results[0].resource_name
-    return _preview_or_done(confirm, "ad_group_update", details)
+    return _preview_or_done(confirm, "mutate_ad_group_update", details)
 
 
 @mutate_mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
@@ -1368,13 +1469,25 @@ def keywords_ideas(
     language_id: str = "1000",
     geo_ids: List[str] = [],
     limit: int = 30,
-) -> List[Dict[str, Any]]:
-    """Generates keyword ideas from Google Keyword Planner.
+) -> Dict[str, Any]:
+    """Generates keyword ideas from Google Keyword Planner; envelope, not
+    a bare list.
 
-    Read-only. Seed with keywords and/or a landing page URL. language_id:
-    1000=en, 1002=fr, 1001=de... geo_ids: e.g. ["2840"] for US; empty =
-    all locations. Returns text, avg monthly searches, competition and
-    top-of-page bid range, sorted by search volume.
+    Read-only. Returns {items, returned, truncated, warning?}: each item
+    has text, avg monthly searches, competition and top-of-page bid range.
+    Order is whatever the Keyword Planner API returns — not sorted by
+    this tool. If truncated: raise limit before concluding an idea does
+    not exist, and tell the user the list is incomplete.
+
+    Args:
+        customer_id: The client account id (digits only, no hyphens).
+        seed_keywords: Seed keywords; pass these and/or page_url.
+        page_url: Landing page URL to seed ideas from.
+        language_id: Keyword Planner language constant id (1000=en,
+            1002=fr, 1001=de...).
+        geo_ids: Geo target constant ids, e.g. ["2840"] for US; empty =
+            all locations.
+        limit: Max ideas to return (default 30).
     """
     customer_id = _clean_customer_id(customer_id)
     if not seed_keywords and not page_url:
@@ -1406,6 +1519,7 @@ def keywords_ideas(
     except GoogleAdsException as ex:
         _raise_tool_error(ex)
 
+    cap = int(limit)
     out: List[Dict[str, Any]] = []
     for idea in response:
         m = idea.keyword_idea_metrics
@@ -1422,9 +1536,9 @@ def keywords_ideas(
                 ),
             }
         )
-        if len(out) >= int(limit):
+        if len(out) >= cap + 1:
             break
-    return out
+    return utils.list_envelope(out, cap)
 
 
 @mutate_mcp.tool(annotations=_WRITE_ANNOTATIONS)
@@ -1432,38 +1546,37 @@ def keywords_add(
     customer_id: str,
     ad_group_id: str,
     keywords: List[str],
-    match_type: str = "BROAD",
+    match_type: _MATCH_TYPE_ENUM = "BROAD",
     negative: bool = False,
     cpc_bid: Optional[float] = None,
     auto_exempt: bool = False,
     confirm: bool = False,
 ) -> Dict[str, Any]:
-    """Adds keywords (or negative keywords) to an ad group.
+    """Add keywords (or ad-group negative keywords) to an ad group.
 
-    With confirm=true the request runs in partial-failure mode: valid
-    keywords are created even if some fail. Keywords rejected for a policy
-    violation are returned in "policy_failed", each with an "exemptible"
-    flag. Re-sending an exemptible one with a policy exemption
-    (auto_exempt=true) asserts on the account owner's behalf that the
-    flagged violation is a false positive, so leave auto_exempt off unless
-    the specific violations have been reviewed and judged wrong.
-
-    DRY-RUN vs APPLY: the dry-run validates all keywords atomically
-    (partial_failure=false, because the API rejects partial_failure
-    together with validate_only), so a single invalid keyword fails the
-    whole preview. The apply uses partial_failure=true, so per-keyword
-    outcomes can differ from what the preview suggested.
-
-    SAFETY: by default runs in DRY-RUN mode (validate_only). Re-run with
-    confirm=true to apply.
+    WHEN TO USE: ad-group keywords. Campaign-level negatives:
+    negatives_add_campaign_keywords; reusable list:
+    negatives_shared_set_add_keywords; ideas: mutate_keywords_ideas.
+    PRECONDITIONS: the ad group must exist; one call carries one
+    match_type.
+    SIDE EFFECTS: policy-blocked keywords come back in "policy_failed" with
+    an "exemptible" flag. auto_exempt=true re-sends the exemptible ones
+    asserting on the account owner's behalf that the violation is a false
+    positive — leave it off unless those violations were reviewed.
+    DRY-RUN: confirm=false (default) validates ALL keywords remotely and
+    atomically (the API rejects partial_failure with validate_only), so
+    one invalid keyword fails the whole preview. confirm=true applies
+    with partial_failure=true, so per-keyword outcomes can differ from
+    the preview.
+    UNITS & IDS: money in account currency (micros internally).
 
     Args:
         customer_id: The client account id (digits only, no hyphens).
         ad_group_id: The numeric id of the ad group.
         keywords: List of keyword texts, e.g. ["weight loss app",
             "fitness plan"].
-        match_type: EXACT, PHRASE or BROAD (applies to all keywords in the
-            call; make separate calls for different match types).
+        match_type: Applies to all keywords in the call; make separate
+            calls for different match types.
         negative: True to add as ad-group-level negative keywords.
         cpc_bid: Optional max CPC bid in account currency (ignored for
             negative keywords).
@@ -1600,7 +1713,7 @@ def keywords_add(
                 "exemption claiming the violation is a false positive. The "
                 "dry-run cannot show which keywords that would affect."
             )
-    return _preview_or_done(confirm, "keywords_add", details)
+    return _preview_or_done(confirm, "mutate_keywords_add", details)
 
 
 @mutate_mcp.tool(
@@ -1612,12 +1725,17 @@ def keywords_remove(
     criterion_ids: List[str],
     confirm: bool = False,
 ) -> Dict[str, Any]:
-    """Removes keywords from an ad group by criterion id. IRREVERSIBLE.
+    """Remove keywords from an ad group by criterion id. IRREVERSIBLE.
 
-    Find criterion ids first via search on resource ad_group_criterion
-    (fields: ad_group_criterion.criterion_id, ad_group_criterion.keyword.text).
-    SAFETY: by default runs in DRY-RUN mode (validate_only). Re-run with
-    confirm=true to apply.
+    WHEN TO USE: deleting keywords for good. To stop traffic without
+    losing history add a negative (negatives_add_campaign_keywords).
+    PRECONDITIONS: get criterion ids with search_search on resource
+    ad_group_criterion (ad_group_criterion.criterion_id, .keyword.text).
+    SIDE EFFECTS: the keywords and their history are gone — they can only
+    be re-created.
+    DRY-RUN: confirm=false (default) validates remotely, changes nothing;
+    confirm=true applies.
+    UNITS & IDS: criterion ids are per ad group, not global.
 
     Args:
         customer_id: The client account id (digits only, no hyphens).
@@ -1659,7 +1777,7 @@ def keywords_remove(
         details["removed_resources"] = [
             r.resource_name for r in response.results
         ]
-    return _preview_or_done(confirm, "keywords_remove", details)
+    return _preview_or_done(confirm, "mutate_keywords_remove", details)
 
 
 @mutate_mcp.tool(annotations=_WRITE_ANNOTATIONS)
@@ -1672,23 +1790,32 @@ def ad_create_rsa(
     path1: Optional[str] = None,
     path2: Optional[str] = None,
     tracking_url_template: Optional[str] = None,
-    status: str = "PAUSED",
+    status: _STATUS_ENUM = "PAUSED",
     confirm: bool = False,
 ) -> Dict[str, Any]:
-    """Creates a Responsive Search Ad (RSA) in an ad group.
+    """Create a Responsive Search Ad (RSA) in an ad group.
 
-    SAFETY: by default runs in DRY-RUN mode (validate_only). Re-run with
-    confirm=true to apply. Created PAUSED unless status="ENABLED".
+    WHEN TO USE: Search ad groups. Other channels:
+    display_ad_create_responsive, shopping_ad_create_product,
+    demandgen_ad_create_image/_video/_carousel.
+    PRECONDITIONS: the ad group must exist. Lengths are checked LOCALLY
+    first: 3-15 headlines <=30 chars, 2-4 descriptions <=90 chars.
+    SIDE EFFECTS: created PAUSED unless status="ENABLED", and still has to
+    pass Google's policy review before it serves.
+    DRY-RUN: confirm=false (default) validates remotely, changes nothing;
+    confirm=true applies.
 
     Args:
         customer_id: The client account id (digits only, no hyphens).
         ad_group_id: The numeric id of the ad group.
         headlines: 3-15 headlines, max 30 characters each.
         descriptions: 2-4 descriptions, max 90 characters each.
-        final_url: Landing page URL (include UTM parameters here if needed).
-        path1: Optional display path 1 (max 15 chars).
-        path2: Optional display path 2 (max 15 chars, requires path1).
-        status: PAUSED (default) or ENABLED.
+        final_url: Landing page URL (put UTM parameters here if needed).
+        path1: Display path 1 (max 15 chars).
+        path2: Display path 2 (max 15 chars; ignored without path1).
+        tracking_url_template: Tracking template; Google requires it to
+            contain the {lpurl} placeholder.
+        status: Status the ad is created with.
         confirm: False = dry-run preview (default), True = apply changes.
     """
     customer_id = _clean_customer_id(customer_id)
@@ -1751,7 +1878,7 @@ def ad_create_rsa(
     }
     if confirm:
         details["created_resource"] = response.results[0].resource_name
-    return _preview_or_done(confirm, "ad_create_rsa", details)
+    return _preview_or_done(confirm, "mutate_ad_create_rsa", details)
 
 
 @mutate_mcp.tool(
@@ -1764,10 +1891,16 @@ def ad_update_status(
     status: str,
     confirm: bool = False,
 ) -> Dict[str, Any]:
-    """Pauses, enables or removes an ad.
+    """Pause, enable or remove one ad.
 
-    SAFETY: by default runs in DRY-RUN mode (validate_only). Re-run with
-    confirm=true to apply. REMOVED is irreversible.
+    WHEN TO USE: one ad. Whole ad group: mutate_ad_group_update; whole
+    campaign: mutate_campaign_update_status.
+    PRECONDITIONS: both ids are needed (an ad is addressed adGroupId~adId)
+    — find them with search_search on resource ad_group_ad.
+    SIDE EFFECTS: serving changes at once. REMOVED is IRREVERSIBLE — the
+    ad can only be re-created.
+    DRY-RUN: confirm=false (default) validates remotely, changes nothing;
+    confirm=true applies.
 
     Args:
         customer_id: The client account id (digits only, no hyphens).
@@ -1815,7 +1948,7 @@ def ad_update_status(
     }
     if confirm:
         details["updated_resource"] = response.results[0].resource_name
-    return _preview_or_done(confirm, "ad_update_status", details)
+    return _preview_or_done(confirm, "mutate_ad_update_status", details)
 
 
 @mutate_mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
@@ -1824,10 +1957,17 @@ def list_campaigns(
     status: Optional[str] = None,
     include_removed: bool = False,
     limit: int = 100,
-) -> List[Dict[str, Any]]:
-    """Convenience helper: lists campaigns with id, name, status, budget.
+) -> Dict[str, Any]:
+    """Lists campaigns (id, name, status, budget); envelope, not a bare
+    list.
 
-    Useful before calling the write tools to find campaign ids.
+    Useful before calling the write tools to find campaign ids. Returns
+    {items, returned, truncated, warning?}. A campaign missing from a
+    truncated list means "not on this page", NOT "does not exist" — this
+    list feeds duplicate-name checks before mutate_campaign_create, so a
+    truncated result must never be read as a clean name search. If
+    truncated: raise limit or narrow the filter, and tell the user the
+    list is incomplete before concluding a name is free.
 
     Args:
         customer_id: The client account id (digits only, no hyphens).
@@ -1849,15 +1989,16 @@ def list_campaigns(
     elif not include_removed:
         conditions.append("campaign.status != 'REMOVED'")
     where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+    cap = int(limit)
     query = (
         "SELECT campaign.id, campaign.name, campaign.status, "
         "campaign.advertising_channel_type, campaign_budget.amount_micros "
         f"FROM campaign {where} ORDER BY campaign.status ASC, "
-        f"campaign.name ASC LIMIT {int(limit)}"
+        f"campaign.name ASC LIMIT {cap + 1}"
     )
     try:
         rows = ga_service.search(customer_id=customer_id, query=query)
-        return [
+        items = [
             {
                 "id": str(row.campaign.id),
                 "name": row.campaign.name,
@@ -1867,6 +2008,7 @@ def list_campaigns(
             }
             for row in rows
         ]
+        return utils.list_envelope(items, cap)
     except GoogleAdsException as ex:
         _raise_tool_error(ex)
 
@@ -1878,17 +2020,26 @@ def campaign_set_conversion_goals(
     biddable_categories: List[str],
     confirm: bool = False,
 ) -> Dict[str, Any]:
-    """Sets CAMPAIGN-SPECIFIC standard conversion goals (e.g. Purchases).
+    """Set CAMPAIGN-SPECIFIC standard conversion goals (e.g. Purchases).
 
-    Switches the campaign to campaign-level goals and makes the given
-    category goals biddable while turning the rest off — mirrors the UI
-    "Campaign-specific: <category>" setting. biddable_categories: e.g.
-    ["PURCHASE"], ["PURCHASE","ADD_TO_CART"].
+    WHEN TO USE: standard category goals (the UI "Campaign-specific:
+    <category>"). Custom goal: mutate_campaign_set_custom_conversion_goal.
+    PRECONDITIONS: the categories must already exist as goals — this flips
+    existing ones, it creates none. List them with search_search on
+    resource campaign_conversion_goal.
+    SIDE EFFECTS: switches the campaign to campaign-level goals AND makes
+    the listed categories biddable, turning every other one off. Changing
+    what a campaign bids on resets Smart Bidding learning.
+    DRY-RUN: only the goal-config-level switch is sent for validation; the
+    per-category flips are computed LOCALLY and never sent, so "changed"
+    is a local diff and the apply can still fail. confirm=true applies.
 
-    The dry-run reads the current goals too, so "changed" already lists the
-    categories the apply would switch on and off.
-
-    SAFETY: dry-run by default (validate_only); re-run with confirm=true.
+    Args:
+        customer_id: The client account id (digits only, no hyphens).
+        campaign_id: The numeric id of the campaign.
+        biddable_categories: Categories to bid on, e.g. ["PURCHASE"]; every
+            category not listed is switched off.
+        confirm: False = dry-run preview (default), True = apply.
     """
     from google.protobuf import field_mask_pb2
 
@@ -1979,7 +2130,22 @@ def campaign_set_conversion_goals(
         "biddable_categories": sorted(wanted),
         "changed": changed,
     }
-    return _preview_or_done(confirm, "campaign_set_conversion_goals", details)
+    if not confirm:
+        # Only step 1 round-trips with validate_only. The category flips in
+        # "changed" are a local diff of the current goals: their operations
+        # are built but never sent, so the envelope must not claim Google
+        # validated them.
+        details["validation"] = _GOAL_FLIP_VALIDATION
+        return _preview_or_done(
+            False,
+            "mutate_campaign_set_conversion_goals",
+            details,
+            validated=False,
+            note=_GOAL_FLIP_DRY_RUN_NOTE,
+        )
+    return _preview_or_done(
+        True, "mutate_campaign_set_conversion_goals", details
+    )
 
 
 @mutate_mcp.tool(annotations=_WRITE_ANNOTATIONS)
@@ -1989,15 +2155,21 @@ def campaign_set_custom_conversion_goal(
     custom_conversion_goal_id: str,
     confirm: bool = False,
 ) -> Dict[str, Any]:
-    """Points a campaign at a CUSTOM conversion goal (instead of the
-    account-default goals).
+    """Point a campaign at a CUSTOM conversion goal.
 
-    Find goal ids via search on resource custom_conversion_goal, or copy
-    from a sibling campaign via resource conversion_goal_campaign_config.
-    All standard category goals that are still biddable get switched off;
-    the dry-run counts them in "disabled_category_goals".
-
-    SAFETY: dry-run by default (validate_only); re-run with confirm=true.
+    WHEN TO USE: a product-specific custom goal, replacing the
+    account-default goals a new campaign starts on. Standard categories:
+    mutate_campaign_set_conversion_goals.
+    PRECONDITIONS: the goal must exist — find ids with search_search on
+    resource custom_conversion_goal, or copy a sibling campaign's via
+    resource conversion_goal_campaign_config.
+    SIDE EFFECTS: switches to campaign-level goals AND turns off every
+    still-biddable standard category goal (counted in
+    "disabled_category_goals"), as the UI does. Resets bidding learning.
+    DRY-RUN: only the goal-config-level switch is sent for validation;
+    disabling the category goals is computed LOCALLY and never sent, so
+    the count is a local read and the apply can still fail. confirm=true
+    applies.
 
     Args:
         customer_id: The client account id (digits only, no hyphens).
@@ -2089,8 +2261,18 @@ def campaign_set_custom_conversion_goal(
         "goal_config_level": "CAMPAIGN",
         "disabled_category_goals": disabled_categories,
     }
-    if confirm:
-        details["updated_resource"] = response.results[0].resource_name
+    if not confirm:
+        # Only the config-level switch round-trips with validate_only; the
+        # category goals are merely counted here and disabled on apply.
+        details["validation"] = _GOAL_FLIP_VALIDATION
+        return _preview_or_done(
+            False,
+            "mutate_campaign_set_custom_conversion_goal",
+            details,
+            validated=False,
+            note=_GOAL_FLIP_DRY_RUN_NOTE,
+        )
+    details["updated_resource"] = response.results[0].resource_name
     return _preview_or_done(
-        confirm, "campaign_set_custom_conversion_goal", details
+        True, "mutate_campaign_set_custom_conversion_goal", details
     )

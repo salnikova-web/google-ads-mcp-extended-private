@@ -27,11 +27,12 @@ Safety model: identical to ads_mcp.tools.mutate — every write tool accepts
 """
 
 import time
-from typing import Any, Dict, List, Optional
+from typing import Annotated, Any, Dict, List, Optional
 
 from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
 from mcp.types import ToolAnnotations
+from pydantic import Field
 from google.ads.googleads.errors import GoogleAdsException
 
 import ads_mcp.utils as utils
@@ -46,6 +47,22 @@ pmax_mcp = FastMCP("pmax")
 
 _WRITE = ToolAnnotations(readOnlyHint=False, destructiveHint=False)
 _READ = ToolAnnotations(readOnlyHint=True)
+
+# Schema-only aliases: advertise the accepted values in tools/list via
+# json_schema_extra while runtime validation stays the existing lax
+# .upper() + explicit ToolError checks (a true Literal would reject
+# lowercase input that works today).
+_STATUS_ENUM = Annotated[
+    str, Field(json_schema_extra={"enum": ["PAUSED", "ENABLED"]})
+]
+_BIDDING_ENUM = Annotated[
+    str,
+    Field(
+        json_schema_extra={
+            "enum": ["MAXIMIZE_CONVERSIONS", "MAXIMIZE_CONVERSION_VALUE"]
+        }
+    ),
+]
 
 _TEXT_FIELD_TYPES = ("HEADLINE", "LONG_HEADLINE", "DESCRIPTION")
 _MEDIA_FIELD_TYPES = (
@@ -81,7 +98,7 @@ def campaign_create(
     customer_id: str,
     name: str,
     daily_budget: float,
-    bidding_strategy: str = "MAXIMIZE_CONVERSIONS",
+    bidding_strategy: _BIDDING_ENUM = "MAXIMIZE_CONVERSIONS",
     target_cpa: Optional[float] = None,
     target_roas: Optional[float] = None,
     business_name: Optional[str] = None,
@@ -90,7 +107,7 @@ def campaign_create(
     feed_label: Optional[str] = None,
     tracking_url_template: Optional[str] = None,
     final_url_suffix: Optional[str] = None,
-    status: str = "PAUSED",
+    status: _STATUS_ENUM = "PAUSED",
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
     confirm: bool = False,
@@ -100,7 +117,8 @@ def campaign_create(
     Optional tracking_url_template / final_url_suffix set UTM tracking at
     creation (recommended for web funnels). NOTE: the campaign is
     created with ACCOUNT-DEFAULT conversion goals — attach the product's
-    custom goal with campaign_set_custom_conversion_goal right after.
+    custom goal with mutate_campaign_set_custom_conversion_goal right
+    after.
 
     NOTE: accounts with Brand Guidelines enabled (Google default since 2025)
     REQUIRE business_name and logo_asset_id (square logo, upload first via
@@ -122,7 +140,9 @@ def campaign_create(
             BUSINESS_NAME asset (required with Brand Guidelines).
         logo_asset_id: Asset id of a square logo image (required with
             Brand Guidelines).
-        status: PAUSED (default) or ENABLED.
+        start_date: "YYYY-MM-DD" (dashes required), account timezone;
+            defaults to today.
+        end_date: "YYYY-MM-DD" (dashes required), inclusive; omit for none.
         confirm: False = dry-run preview (default), True = apply.
     """
     customer_id = _clean_customer_id(customer_id)
@@ -347,7 +367,7 @@ def asset_group_create(
     youtube_video_asset_ids: List[str] = [],
     path1: Optional[str] = None,
     path2: Optional[str] = None,
-    status: str = "PAUSED",
+    status: _STATUS_ENUM = "PAUSED",
     confirm: bool = False,
 ) -> Dict[str, Any]:
     """Creates a complete PMax asset group in one request.
@@ -381,7 +401,6 @@ def asset_group_create(
             (up to 15 per asset group — Google raised the cap from 5).
         path1: Optional display path 1 (max 15 chars).
         path2: Optional display path 2 (max 15 chars, requires path1).
-        status: PAUSED (default) or ENABLED.
         confirm: False = dry-run preview (default), True = apply.
     """
     customer_id = _clean_customer_id(customer_id)
@@ -844,8 +863,8 @@ def signal_attach(
     """Adds an audience signal OR a search theme to a PMax asset group.
 
     Pass exactly one of audience_id / search_theme. Find audience ids via
-    search on resource `audience`. SAFETY: dry-run by default; re-run with
-    confirm=true.
+    search_search on resource `audience`. SAFETY: dry-run by default;
+    re-run with confirm=true.
 
     Args:
         customer_id: The client account id (digits only, no hyphens).

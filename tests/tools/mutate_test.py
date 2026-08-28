@@ -195,6 +195,29 @@ class TestCampaignUpdateBidding(WriteToolTestCase):
         )
 
 
+def make_campaign_list_row(
+    campaign_id,
+    name,
+    status="ENABLED",
+    channel_type="SEARCH",
+    daily_budget_micros=10_000_000,
+):
+    """A typed stand-in for one row of the campaign listing.
+
+    Field types match the proto (ints for ids/micros), because the tool
+    coerces them with int()/str().
+    """
+    return SimpleNamespace(
+        campaign=SimpleNamespace(
+            id=int(campaign_id),
+            name=name,
+            status=SimpleNamespace(name=status),
+            advertising_channel_type=SimpleNamespace(name=channel_type),
+        ),
+        campaign_budget=SimpleNamespace(amount_micros=int(daily_budget_micros)),
+    )
+
+
 class TestListCampaigns(WriteToolTestCase):
 
     def test_status_outside_allowlist_is_rejected(self):
@@ -205,9 +228,91 @@ class TestListCampaigns(WriteToolTestCase):
     def test_lowercase_status_is_accepted(self):
         self.service.search.return_value = []
         result = mutate.list_campaigns("1234567890", status="enabled")
-        self.assertEqual(result, [])
+        self.assertEqual(
+            result, {"items": [], "returned": 0, "truncated": False}
+        )
         query = self.service.search.call_args.kwargs["query"]
         self.assertIn("campaign.status = 'ENABLED'", query)
+
+    def test_default_limit_probes_one_past_the_cap(self):
+        self.service.search.return_value = []
+        mutate.list_campaigns("1234567890")
+        query = self.service.search.call_args.kwargs["query"]
+        self.assertIn("LIMIT 101", query)
+        self.assertIn("ORDER BY", query)
+
+    def test_over_cap_rows_are_truncated_with_a_warning(self):
+        self.service.search.return_value = [
+            make_campaign_list_row(i, f"Camp {i}") for i in range(1, 4)
+        ]
+        result = mutate.list_campaigns("1234567890", limit=2)
+        self.assertEqual(result["returned"], 2)
+        self.assertEqual(len(result["items"]), 2)
+        self.assertTrue(result["truncated"])
+        self.assertIn("truncated", result["warning"])
+
+    def test_under_cap_rows_are_not_truncated_and_carry_no_warning(self):
+        self.service.search.return_value = [
+            make_campaign_list_row(i, f"Camp {i}") for i in range(1, 3)
+        ]
+        result = mutate.list_campaigns("1234567890", limit=5)
+        self.assertFalse(result["truncated"])
+        self.assertEqual(result["returned"], 2)
+        self.assertNotIn("warning", result)
+
+
+def make_keyword_idea(
+    text,
+    avg_monthly_searches=100,
+    competition="LOW",
+    low_bid_micros=1_000_000,
+    high_bid_micros=2_000_000,
+):
+    """A typed stand-in for one GenerateKeywordIdeaResult.
+
+    Field types match the proto (ints for the micros/search-volume
+    fields), because the tool coerces them with int()/round().
+    """
+    return SimpleNamespace(
+        text=text,
+        keyword_idea_metrics=SimpleNamespace(
+            avg_monthly_searches=int(avg_monthly_searches),
+            competition=SimpleNamespace(name=competition),
+            low_top_of_page_bid_micros=int(low_bid_micros),
+            high_top_of_page_bid_micros=int(high_bid_micros),
+        ),
+    )
+
+
+class TestKeywordsIdeas(WriteToolTestCase):
+
+    def test_requires_seed_keywords_or_page_url(self):
+        with self.assertRaises(ToolError):
+            mutate.keywords_ideas("1234567890")
+        self.service.generate_keyword_ideas.assert_not_called()
+
+    def test_over_cap_ideas_are_truncated_with_a_warning(self):
+        self.service.generate_keyword_ideas.return_value = [
+            make_keyword_idea(f"kw{i}") for i in range(1, 4)
+        ]
+        result = mutate.keywords_ideas(
+            "1234567890", seed_keywords=["a"], limit=2
+        )
+        self.assertEqual(result["returned"], 2)
+        self.assertEqual(len(result["items"]), 2)
+        self.assertTrue(result["truncated"])
+        self.assertIn("truncated", result["warning"])
+
+    def test_under_cap_ideas_are_not_truncated_and_carry_no_warning(self):
+        self.service.generate_keyword_ideas.return_value = [
+            make_keyword_idea(f"kw{i}") for i in range(1, 3)
+        ]
+        result = mutate.keywords_ideas(
+            "1234567890", seed_keywords=["a"], limit=5
+        )
+        self.assertFalse(result["truncated"])
+        self.assertEqual(result["returned"], 2)
+        self.assertNotIn("warning", result)
 
 
 class TestKeywordsAdd(WriteToolTestCase):
@@ -859,6 +964,97 @@ class TestNoApiDryRuns(WriteToolTestCase):
                 self.mock_get_googleads_client.assert_not_called()
                 self.mock_get_googleads_service.assert_not_called()
                 self.assertEqual(self.service.mock_calls, [])
+
+
+class TestConversionGoalDryRunsAreHonest(WriteToolTestCase):
+    """The conversion-goal tools mutate in two steps and only the first one
+    round-trips on a dry-run.
+
+    ``goal_config_level`` is sent with validate_only, but the per-category
+    goal flips are built and then dropped when confirm is false — they are
+    only sent on apply. The preview used to claim the whole operation had
+    been "validated by Google Ads (validate_only=true)", which is exactly
+    the part that was never sent.
+    """
+
+    CALLS = [
+        (
+            mutate.campaign_set_conversion_goals,
+            ("1234567890", "222", ["PURCHASE"]),
+        ),
+        (
+            mutate.campaign_set_custom_conversion_goal,
+            ("1234567890", "222", "999"),
+        ),
+    ]
+
+    def setUp(self):
+        super().setUp()
+        # A goal row that is biddable but not wanted, so both tools find
+        # something to flip and the local diff is non-empty.
+        self.service.search.return_value = [
+            SimpleNamespace(
+                campaign_conversion_goal=SimpleNamespace(
+                    resource_name=(
+                        "customers/1234567890/campaignConversionGoals/222~1"
+                    ),
+                    category=SimpleNamespace(name="ADD_TO_CART"),
+                    origin=SimpleNamespace(name="WEBSITE"),
+                    biddable=True,
+                )
+            )
+        ]
+
+    def test_dry_run_does_not_claim_the_flips_were_validated(self):
+        for fn, args in self.CALLS:
+            with self.subTest(tool=fn.__name__):
+                result = fn(*args)
+                self.assertIs(result["applied"], False)
+                self.assertIs(result["validated"], False)
+                self.assertNotIn("validated by Google Ads", result["note"])
+                self.assertIn("goal-config-level switch", result["note"])
+                self.assertEqual(
+                    result["validation"],
+                    {
+                        "goal_config_level": (
+                            "validated remotely (validate_only=true)"
+                        ),
+                        "category_goal_flips": (
+                            "previewed locally, NOT sent to Google Ads"
+                        ),
+                    },
+                )
+
+    def test_dry_run_never_sends_the_goal_flips(self):
+        for fn, args in self.CALLS:
+            with self.subTest(tool=fn.__name__):
+                self.service.reset_mock(return_value=False)
+                fn(*args)
+                # Step 1 is sent (validate_only); step 2 is not sent at all.
+                config_call = (
+                    self.service.mutate_conversion_goal_campaign_configs
+                )
+                self.assertEqual(config_call.call_count, 1)
+                self.assertIs(
+                    config_call.call_args.kwargs["request"].validate_only,
+                    True,
+                )
+                self.service.mutate_campaign_conversion_goals.assert_not_called()
+
+    def test_apply_sends_both_steps(self):
+        for fn, args in self.CALLS:
+            with self.subTest(tool=fn.__name__):
+                self.service.reset_mock(return_value=False)
+                result = fn(*args, confirm=True)
+                self.assertIs(result["applied"], True)
+                self.assertNotIn("validated", result)
+                self.assertIs(
+                    self.service.mutate_conversion_goal_campaign_configs.call_args.kwargs[
+                        "request"
+                    ].validate_only,
+                    False,
+                )
+                self.service.mutate_campaign_conversion_goals.assert_called_once()
 
 
 class TestGaqlReadErrorsAreTranslated(WriteToolTestCase):

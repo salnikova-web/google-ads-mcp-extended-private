@@ -25,6 +25,11 @@ audiences_mcp = FastMCP("audiences")
 _WRITE = ToolAnnotations(readOnlyHint=False, destructiveHint=False)
 _READ = ToolAnnotations(readOnlyHint=True)
 
+# Mirrors targeting.py's own _GENDERS guard: pre-validate against the
+# documented allow-list and name it in the error, rather than let an
+# unknown value reach the enum lookup as a raw KeyError.
+_GENDERS = ("MALE", "FEMALE", "UNDETERMINED")
+
 
 @audiences_mcp.tool(annotations=_WRITE)
 def create(
@@ -63,7 +68,10 @@ def create(
     if genders:
         dim = client.get_type("AudienceDimension")
         for g in genders:
-            dim.gender.genders.append(client.enums.GenderTypeEnum[g.upper()])
+            key = str(g).upper()
+            if key not in _GENDERS:
+                raise ToolError(f"Unknown gender '{g}'; valid: {_GENDERS}")
+            dim.gender.genders.append(client.enums.GenderTypeEnum[key])
         dim.gender.include_undetermined = True
         aud.dimensions.append(dim)
 

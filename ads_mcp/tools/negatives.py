@@ -6,11 +6,12 @@
 Safety model: ``confirm=False`` (default) = validate_only dry-run.
 """
 
-from typing import Any, Dict, List
+from typing import Annotated, Any, Dict, List
 
 from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
 from mcp.types import ToolAnnotations
+from pydantic import Field
 from google.ads.googleads.errors import GoogleAdsException
 
 import ads_mcp.utils as utils
@@ -25,21 +26,43 @@ negatives_mcp = FastMCP("negatives")
 _WRITE = ToolAnnotations(readOnlyHint=False, destructiveHint=False)
 _READ = ToolAnnotations(readOnlyHint=True)
 
+# Schema-only alias shared by both match_type sites below: advertises the
+# accepted values in tools/list while runtime validation stays the existing
+# lax .upper() + explicit ToolError check (a true Literal would reject
+# lowercase input that works today).
+_MATCH_TYPE_ENUM = Annotated[
+    str, Field(json_schema_extra={"enum": ["EXACT", "PHRASE", "BROAD"]})
+]
+
 
 @negatives_mcp.tool(annotations=_WRITE)
 def add_campaign_keywords(
     customer_id: str,
     campaign_id: str,
     keywords: List[str],
-    match_type: str = "BROAD",
+    match_type: Annotated[
+        _MATCH_TYPE_ENUM,
+        Field(description="Applies to all keywords in the call."),
+    ] = "BROAD",
     confirm: bool = False,
 ) -> Dict[str, Any]:
-    """Adds campaign-level NEGATIVE keywords directly to a campaign.
+    """Add campaign-level NEGATIVE keywords directly to a campaign.
 
-    Works for any channel including Performance Max (which has no ad
-    groups). match_type: EXACT, PHRASE or BROAD.
+    WHEN TO USE: one campaign, any channel including PMax (no ad groups
+    there). One ad group: mutate_keywords_add(negative=true); reusable
+    across campaigns: negatives_shared_set_create.
+    PRECONDITIONS: the campaign must exist (mutate_list_campaigns).
+    SIDE EFFECTS: ADDS criteria, never removes any (a repeat is a
+    duplicate). A broad negative blocks every search it matches.
+    DRY-RUN: confirm=false (default) validates remotely, changes nothing;
+    confirm=true applies.
 
-    SAFETY: dry-run by default (validate_only); re-run with confirm=true.
+    Args:
+        customer_id: The client account id (digits only, no hyphens).
+        campaign_id: The numeric id of the campaign.
+        keywords: Keyword texts to exclude.
+        match_type: Applies to all keywords in the call.
+        confirm: False = dry-run preview (default), True = apply.
     """
     customer_id = _clean_customer_id(customer_id)
     match_type = match_type.upper()
@@ -88,9 +111,17 @@ def shared_set_create(
     name: str,
     confirm: bool = False,
 ) -> Dict[str, Any]:
-    """Creates a shared negative keyword list.
+    """Create an empty shared negative keyword list.
 
-    SAFETY: dry-run by default; re-run with confirm=true.
+    WHEN TO USE: negatives several campaigns should share; for one
+    campaign negatives_add_campaign_keywords is fewer steps.
+    PRECONDITIONS: the name must be free — check negatives_list_shared_sets
+    (a truncated list is not proof).
+    SIDE EFFECTS: creates an EMPTY list that blocks nothing. Fill it with
+    negatives_shared_set_add_keywords, attach with
+    negatives_attach_to_campaigns.
+    DRY-RUN: confirm=false (default) validates remotely, changes nothing;
+    confirm=true applies.
 
     Args:
         customer_id: The client account id (digits only, no hyphens).
@@ -127,18 +158,25 @@ def shared_set_add_keywords(
     customer_id: str,
     shared_set_id: str,
     keywords: List[str],
-    match_type: str = "BROAD",
+    match_type: _MATCH_TYPE_ENUM = "BROAD",
     confirm: bool = False,
 ) -> Dict[str, Any]:
-    """Adds negative keywords to a shared list.
+    """Add negative keywords to an existing shared list.
 
-    SAFETY: dry-run by default; re-run with confirm=true.
+    WHEN TO USE: filling a shared list; the negatives take effect in every
+    campaign it is attached to.
+    PRECONDITIONS: the list must exist (negatives_shared_set_create; ids
+    from negatives_list_shared_sets).
+    SIDE EFFECTS: ADDS criteria, never removes any, and the change hits
+    every attached campaign at once.
+    DRY-RUN: confirm=false (default) validates remotely, changes nothing;
+    confirm=true applies.
 
     Args:
         customer_id: The client account id (digits only, no hyphens).
         shared_set_id: The numeric id of the shared set.
         keywords: Keyword texts to exclude.
-        match_type: EXACT, PHRASE or BROAD.
+        match_type: Applies to all keywords in the call.
         confirm: False = dry-run preview (default), True = apply.
     """
     customer_id = _clean_customer_id(customer_id)
@@ -195,9 +233,17 @@ def attach_to_campaigns(
     campaign_ids: List[str],
     confirm: bool = False,
 ) -> Dict[str, Any]:
-    """Attaches a shared negative keyword list to campaigns.
+    """Attach a shared negative keyword list to campaigns.
 
-    SAFETY: dry-run by default; re-run with confirm=true.
+    WHEN TO USE: last step of the shared-list flow (create, fill, attach).
+    Detaching is not exposed — do it in the UI.
+    PRECONDITIONS: list and campaigns must exist
+    (negatives_list_shared_sets, mutate_list_campaigns); attaching twice
+    is a duplicate.
+    SIDE EFFECTS: every keyword in the list starts blocking traffic in each
+    campaign at once, and so does anything added to the list later.
+    DRY-RUN: confirm=false (default) validates remotely, changes nothing;
+    confirm=true applies.
 
     Args:
         customer_id: The client account id (digits only, no hyphens).

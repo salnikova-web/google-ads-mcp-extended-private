@@ -14,20 +14,23 @@
 
 """Video campaign tools (YouTube) — write extension.
 
-Workflow: register videos as assets (demandgen_asset_create_youtube_video)
--> video_campaign_create -> video_ad_group_create ->
+Video campaigns can no longer be CREATED through the API: Google migrated
+conversion-focused video to Demand Gen, so ``video_campaign_create`` always
+fails and points at ``demandgen_campaign_create``. What is left here works
+on campaigns that already exist: register videos as assets
+(demandgen_asset_create_youtube_video) -> video_ad_group_create ->
 video_ad_create_responsive.
 
 Safety model: identical to ads_mcp.tools.mutate — every write tool accepts
 ``confirm`` (default ``False`` = validate_only dry-run preview).
 """
 
-import time
-from typing import Any, Dict, List, Optional
+from typing import Annotated, Any, Dict, List, Optional
 
 from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
 from mcp.types import ToolAnnotations
+from pydantic import Field
 from google.ads.googleads.errors import GoogleAdsException
 
 import ads_mcp.utils as utils
@@ -35,12 +38,27 @@ from ads_mcp.tools.mutate import (
     _clean_customer_id,
     _preview_or_done,
     _raise_tool_error,
-    _to_micros,
 )
 
 video_mcp = FastMCP("video")
 
 _WRITE = ToolAnnotations(readOnlyHint=False, destructiveHint=False)
+
+# Schema-only aliases: advertise the accepted values in tools/list via
+# json_schema_extra while runtime validation stays the existing lax
+# .upper() + explicit ToolError checks (a true Literal would reject
+# lowercase input that works today).
+_STATUS_ENUM = Annotated[
+    str, Field(json_schema_extra={"enum": ["PAUSED", "ENABLED"]})
+]
+_BIDDING_ENUM = Annotated[
+    str,
+    Field(
+        json_schema_extra={
+            "enum": ["MAXIMIZE_CONVERSIONS", "MAXIMIZE_CONVERSION_VALUE"]
+        }
+    ),
+]
 
 
 def _text_assets(client, texts: List[str]):
@@ -57,28 +75,31 @@ def campaign_create(
     customer_id: str,
     name: str,
     daily_budget: float,
-    bidding_strategy: str = "MAXIMIZE_CONVERSIONS",
+    bidding_strategy: _BIDDING_ENUM = "MAXIMIZE_CONVERSIONS",
     target_cpa: Optional[float] = None,
     target_roas: Optional[float] = None,
-    status: str = "PAUSED",
+    status: _STATUS_ENUM = "PAUSED",
     confirm: bool = False,
 ) -> Dict[str, Any]:
-    """Creates a Video campaign (YouTube) with a dedicated daily budget.
+    """ALWAYS FAILS: video campaigns cannot be created via the API — use
+    demandgen_campaign_create instead.
 
-    Conversion-focused video campaign ("Drive action"). SAFETY: dry-run by
-    default (validate_only); re-run with confirm=true. Created PAUSED by
-    default.
+    Google migrated conversion-focused video ("Video Action") to Demand Gen
+    and withdrew the create surface, so every call raises. The parameters
+    below are kept only so the failure names the right replacement instead
+    of an argument error. Existing Video campaigns can still be managed
+    with video_ad_group_create, video_ad_create_responsive and the mutate_*
+    tools.
 
     Args:
-        customer_id: The client account id (digits only, no hyphens).
-        name: Campaign name (unique within the account).
-        daily_budget: Daily budget in account currency.
-        bidding_strategy: MAXIMIZE_CONVERSIONS (optional target_cpa) or
-            MAXIMIZE_CONVERSION_VALUE (optional target_roas).
-        target_cpa: Optional target CPA in account currency.
-        target_roas: Optional target ROAS as decimal.
-        status: PAUSED (default) or ENABLED.
-        confirm: False = dry-run preview (default), True = apply.
+        customer_id: Unused; the call fails before it is read.
+        name: Unused; the call fails before it is read.
+        daily_budget: Unused; the call fails before it is read.
+        bidding_strategy: Unused; the call fails before it is read.
+        target_cpa: Unused; the call fails before it is read.
+        target_roas: Unused; the call fails before it is read.
+        status: Unused; the call fails before it is read.
+        confirm: Unused; the call fails before it is read.
     """
     raise ToolError(
         "Google Ads API does not allow creating Video campaigns anymore: "
@@ -88,93 +109,6 @@ def campaign_create(
         "Video campaigns can still be managed with video_ad_group_create, "
         "video_ad_create_responsive and the mutate_* tools."
     )
-    customer_id = _clean_customer_id(customer_id)
-    bidding_strategy = bidding_strategy.upper()
-    status = status.upper()
-    if bidding_strategy not in (
-        "MAXIMIZE_CONVERSIONS",
-        "MAXIMIZE_CONVERSION_VALUE",
-    ):
-        raise ToolError(
-            "bidding_strategy must be MAXIMIZE_CONVERSIONS or "
-            "MAXIMIZE_CONVERSION_VALUE"
-        )
-    if status not in ("PAUSED", "ENABLED"):
-        raise ToolError("status must be PAUSED or ENABLED")
-    if daily_budget <= 0:
-        raise ToolError("daily_budget must be positive")
-
-    client = utils.get_googleads_client()
-    ga_service = utils.get_googleads_service("GoogleAdsService")
-
-    budget_temp_rn = f"customers/{customer_id}/campaignBudgets/-1"
-
-    budget_op = client.get_type("MutateOperation")
-    budget = budget_op.campaign_budget_operation.create
-    budget.resource_name = budget_temp_rn
-    budget.name = f"{name} budget {int(time.time())}"
-    budget.amount_micros = _to_micros(daily_budget)
-    budget.delivery_method = client.enums.BudgetDeliveryMethodEnum.STANDARD
-    budget.explicitly_shared = False
-
-    campaign_op = client.get_type("MutateOperation")
-    campaign = campaign_op.campaign_operation.create
-    campaign.name = name
-    campaign.campaign_budget = budget_temp_rn
-    campaign.contains_eu_political_advertising = (
-        client.enums.EuPoliticalAdvertisingStatusEnum.DOES_NOT_CONTAIN_EU_POLITICAL_ADVERTISING
-    )
-    campaign.status = client.enums.CampaignStatusEnum[status]
-    campaign.advertising_channel_type = (
-        client.enums.AdvertisingChannelTypeEnum.VIDEO
-    )
-
-    if bidding_strategy == "MAXIMIZE_CONVERSIONS":
-        if target_cpa is not None:
-            campaign.maximize_conversions.target_cpa_micros = _to_micros(
-                target_cpa
-            )
-        else:
-            client.copy_from(
-                campaign.maximize_conversions,
-                client.get_type("MaximizeConversions"),
-            )
-    else:
-        if target_roas is not None:
-            campaign.maximize_conversion_value.target_roas = float(target_roas)
-        else:
-            client.copy_from(
-                campaign.maximize_conversion_value,
-                client.get_type("MaximizeConversionValue"),
-            )
-
-    request = client.get_type("MutateGoogleAdsRequest")
-    request.customer_id = customer_id
-    request.mutate_operations.extend([budget_op, campaign_op])
-    request.validate_only = not confirm
-
-    try:
-        response = ga_service.mutate(request=request)
-    except GoogleAdsException as ex:
-        _raise_tool_error(ex)
-
-    details: Dict[str, Any] = {
-        "customer_id": customer_id,
-        "campaign_name": name,
-        "channel_type": "VIDEO",
-        "daily_budget": daily_budget,
-        "bidding_strategy": bidding_strategy,
-        "target_cpa": target_cpa,
-        "target_roas": target_roas,
-        "status": status,
-    }
-    if confirm:
-        details["created_resources"] = [
-            r.campaign_budget_result.resource_name
-            or r.campaign_result.resource_name
-            for r in response.mutate_operation_responses
-        ]
-    return _preview_or_done(confirm, "video_campaign_create", details)
 
 
 @video_mcp.tool(annotations=_WRITE)
@@ -182,7 +116,7 @@ def ad_group_create(
     customer_id: str,
     campaign_id: str,
     name: str,
-    status: str = "PAUSED",
+    status: _STATUS_ENUM = "PAUSED",
     confirm: bool = False,
 ) -> Dict[str, Any]:
     """Creates a VIDEO_RESPONSIVE ad group in a Video campaign.
@@ -193,7 +127,6 @@ def ad_group_create(
         customer_id: The client account id (digits only, no hyphens).
         campaign_id: The numeric id of the Video campaign.
         name: Ad group name.
-        status: PAUSED (default) or ENABLED.
         confirm: False = dry-run preview (default), True = apply.
     """
     customer_id = _clean_customer_id(customer_id)
@@ -243,7 +176,7 @@ def ad_create_responsive(
     long_headlines: List[str],
     descriptions: List[str],
     tracking_url_template: Optional[str] = None,
-    status: str = "PAUSED",
+    status: _STATUS_ENUM = "PAUSED",
     confirm: bool = False,
 ) -> Dict[str, Any]:
     """Creates a responsive video ad in a Video ad group.
@@ -260,7 +193,6 @@ def ad_create_responsive(
         headlines: 1-5 short headlines (recommended max 30 chars).
         long_headlines: 1-5 long headlines (recommended max 90 chars).
         descriptions: 1-5 descriptions (recommended max 90 chars).
-        status: PAUSED (default) or ENABLED.
         confirm: False = dry-run preview (default), True = apply.
     """
     customer_id = _clean_customer_id(customer_id)

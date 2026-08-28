@@ -22,11 +22,12 @@ Safety model: identical to ads_mcp.tools.mutate — every write tool accepts
 ``confirm`` (default ``False`` = validate_only dry-run preview).
 """
 
-from typing import Any, Dict, List, Optional
+from typing import Annotated, Any, Dict, List, Optional
 
 from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
 from mcp.types import ToolAnnotations
+from pydantic import Field
 from google.ads.googleads.errors import GoogleAdsException
 
 import ads_mcp.safe_fetch as safe_fetch
@@ -42,6 +43,26 @@ demandgen_mcp = FastMCP("demandgen")
 
 _WRITE = ToolAnnotations(readOnlyHint=False, destructiveHint=False)
 _READ = ToolAnnotations(readOnlyHint=True)
+
+# Schema-only aliases: advertise the accepted values in tools/list via
+# json_schema_extra while runtime validation stays the existing lax
+# .upper() + explicit ToolError checks (a true Literal would reject
+# lowercase input that works today).
+_STATUS_ENUM = Annotated[
+    str, Field(json_schema_extra={"enum": ["PAUSED", "ENABLED"]})
+]
+_BIDDING_ENUM = Annotated[
+    str,
+    Field(
+        json_schema_extra={
+            "enum": [
+                "MAXIMIZE_CONVERSIONS",
+                "MAXIMIZE_CONVERSION_VALUE",
+                "MAXIMIZE_CLICKS",
+            ]
+        }
+    ),
+]
 
 _MAX_IMAGE_BYTES = 5 * 1024 * 1024  # Google Ads image asset limit (5 MB)
 
@@ -115,7 +136,7 @@ def asset_upload_image(
     }
     if confirm:
         details["created_resource"] = response.results[0].resource_name
-    return _preview_or_done(confirm, "asset_upload_image", details)
+    return _preview_or_done(confirm, "demandgen_asset_upload_image", details)
 
 
 @demandgen_mcp.tool(annotations=_WRITE)
@@ -163,7 +184,9 @@ def asset_create_youtube_video(
     }
     if confirm:
         details["created_resource"] = response.results[0].resource_name
-    return _preview_or_done(confirm, "asset_create_youtube_video", details)
+    return _preview_or_done(
+        confirm, "demandgen_asset_create_youtube_video", details
+    )
 
 
 @demandgen_mcp.tool(annotations=_READ)
@@ -172,8 +195,15 @@ def list_assets(
     asset_type: str = "IMAGE",
     name_contains: Optional[str] = None,
     limit: int = 50,
-) -> List[Dict[str, Any]]:
-    """Lists assets in the account (id, name, type) for use in DG ads.
+) -> Dict[str, Any]:
+    """Lists assets (id, name, type) for reuse in DG ads; envelope, not a
+    bare list.
+
+    Returns {items, returned, truncated, warning?}. A missing asset may
+    still exist — this list feeds asset-id selection before creating an
+    ad, and re-uploading an asset that is merely off the page duplicates
+    it. If truncated: raise limit before assuming the asset needs
+    re-uploading, and tell the user the list is incomplete.
 
     Args:
         customer_id: The client account id (digits only, no hyphens).
@@ -190,10 +220,11 @@ def list_assets(
     where = f"WHERE asset.type = '{asset_type}'"
     if name_contains:
         where += f" AND asset.name LIKE '%{utils.gaql_str(name_contains)}%'"
+    cap = int(limit)
     query = (
         "SELECT asset.id, asset.name, asset.type, "
         "asset.youtube_video_asset.youtube_video_id "
-        f"FROM asset {where} LIMIT {int(limit)}"
+        f"FROM asset {where} ORDER BY asset.id LIMIT {cap + 1}"
     )
     try:
         rows = ga_service.search(customer_id=customer_id, query=query)
@@ -209,7 +240,7 @@ def list_assets(
                     row.asset.youtube_video_asset.youtube_video_id
                 )
             out.append(item)
-        return out
+        return utils.list_envelope(out, cap)
     except GoogleAdsException as ex:
         _raise_tool_error(ex)
 
@@ -219,12 +250,12 @@ def campaign_create(
     customer_id: str,
     name: str,
     daily_budget: float,
-    bidding_strategy: str = "MAXIMIZE_CONVERSIONS",
+    bidding_strategy: _BIDDING_ENUM = "MAXIMIZE_CONVERSIONS",
     target_cpa: Optional[float] = None,
     target_roas: Optional[float] = None,
     tracking_url_template: Optional[str] = None,
     final_url_suffix: Optional[str] = None,
-    status: str = "PAUSED",
+    status: _STATUS_ENUM = "PAUSED",
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
     confirm: bool = False,
@@ -234,12 +265,14 @@ def campaign_create(
     Optional tracking_url_template / final_url_suffix set UTM tracking at
     creation (recommended for web funnels). NOTE: the campaign is
     created with ACCOUNT-DEFAULT conversion goals — attach the product's
-    custom goal with campaign_set_custom_conversion_goal right after.
+    custom goal with mutate_campaign_set_custom_conversion_goal right
+    after.
 
     Demand Gen serves across YouTube (in-feed, Shorts, in-stream), Discover
     and Gmail. Note: channel controls are set per AD GROUP, not on the
-    campaign — restrict placements with ad_group_create(channels=...) or
-    ad_group_update_channels.
+    campaign — restrict placements with
+    demandgen_ad_group_create(channels=...) or
+    demandgen_ad_group_update_channels.
 
     SAFETY: dry-run by default (validate_only); re-run with confirm=true.
     Created PAUSED unless status="ENABLED".
@@ -253,7 +286,9 @@ def campaign_create(
             MAXIMIZE_CLICKS.
         target_cpa: Optional target CPA in account currency.
         target_roas: Optional target ROAS as decimal (3.5 = 350%).
-        status: PAUSED (default) or ENABLED.
+        start_date: "YYYY-MM-DD" (dashes required), account timezone;
+            defaults to today.
+        end_date: "YYYY-MM-DD" (dashes required), inclusive; omit for none.
         confirm: False = dry-run preview (default), True = apply.
 
     NOTE: the Demand Gen "Asset optimization" toggles (shorter videos,
@@ -460,6 +495,22 @@ _DG_CHANNELS = tuple(_DG_CHANNEL_FIELDS)
 
 _CHANNEL_CONTROLS = "demand_gen_ad_group_settings.channel_controls"
 
+# Schema-only aliases (see the block near _WRITE for why json_schema_extra
+# rather than Literal): channels is a List[str] whose *item* type carries
+# the enum so tools/list renders it under "items" rather than the list
+# param itself.
+_CHANNEL_ITEM_ENUM = Annotated[
+    str, Field(json_schema_extra={"enum": list(_DG_CHANNELS)})
+]
+_CHANNEL_STRATEGY_VALUES = [
+    "ALL_CHANNELS",
+    "ALL_OWNED_AND_OPERATED_CHANNELS",
+]
+_CHANNEL_STRATEGY_ENUM = Annotated[
+    Optional[str],
+    Field(json_schema_extra={"enum": _CHANNEL_STRATEGY_VALUES}),
+]
+
 
 def _apply_channels(client, ad_group, channels: List[str]) -> None:
     channels = [c.upper() for c in channels]
@@ -480,26 +531,33 @@ def ad_group_create(
     customer_id: str,
     campaign_id: str,
     name: str,
-    channels: List[str] = [],
-    channel_strategy: Optional[str] = None,
-    status: str = "PAUSED",
+    channels: List[_CHANNEL_ITEM_ENUM] = [],
+    channel_strategy: Annotated[
+        _CHANNEL_STRATEGY_ENUM,
+        Field(
+            description=(
+                "Alternative to channels: ALL_CHANNELS (everything incl. "
+                "Display) or ALL_OWNED_AND_OPERATED_CHANNELS "
+                "(YouTube+Discover+Gmail, no Display)."
+            )
+        ),
+    ] = None,
+    status: _STATUS_ENUM = "PAUSED",
     confirm: bool = False,
 ) -> Dict[str, Any]:
     """Creates an ad group inside a Demand Gen campaign, optionally with
     channel controls (placement selection).
 
-    Attach audiences afterwards with audience_attach. SAFETY: dry-run by
-    default (validate_only); re-run with confirm=true.
+    Attach audiences afterwards with demandgen_audience_attach.
+    SAFETY: dry-run by default (validate_only); re-run with confirm=true.
 
     Args:
         customer_id: The client account id (digits only, no hyphens).
         campaign_id: The numeric id of the Demand Gen campaign.
         name: Ad group name (unique within the campaign).
-        channels: Optional list of placements to serve on. Valid values:
-            YOUTUBE_IN_STREAM, YOUTUBE_IN_FEED, YOUTUBE_SHORTS, DISCOVER,
-            GMAIL, DISPLAY. Omit to serve on all channels (Google default).
-            Example Display-only: ["DISPLAY"].
-        status: PAUSED (default) or ENABLED.
+        channels: Optional list of placements to serve on. Omit to serve on
+            all channels (Google default). Example Display-only:
+            ["DISPLAY"].
         confirm: False = dry-run preview (default), True = apply.
     """
     customer_id = _clean_customer_id(customer_id)
@@ -563,8 +621,8 @@ def ad_group_create(
 def ad_group_update_channels(
     customer_id: str,
     ad_group_id: str,
-    channels: List[str] = [],
-    channel_strategy: Optional[str] = None,
+    channels: List[_CHANNEL_ITEM_ENUM] = [],
+    channel_strategy: _CHANNEL_STRATEGY_ENUM = None,
     confirm: bool = False,
 ) -> Dict[str, Any]:
     """Changes the channel controls (placements) of an existing DG ad group.
@@ -575,8 +633,7 @@ def ad_group_update_channels(
     Args:
         customer_id: The client account id (digits only, no hyphens).
         ad_group_id: The numeric id of the DG ad group.
-        channels: Placements to serve on. Valid values: YOUTUBE_IN_STREAM,
-            YOUTUBE_IN_FEED, YOUTUBE_SHORTS, DISCOVER, GMAIL, DISPLAY.
+        channels: Placements to serve on.
         channel_strategy: Alternative to channels:
             ALL_CHANNELS (everything incl. Display) or
             ALL_OWNED_AND_OPERATED_CHANNELS (YouTube+Discover+Gmail,
@@ -662,7 +719,7 @@ def audience_attach(
 ) -> Dict[str, Any]:
     """Attaches an existing Audience to an ad group as targeting.
 
-    Find audience ids via search on resource `audience` (fields:
+    Find audience ids via search_search on resource `audience` (fields:
     audience.id, audience.name). SAFETY: dry-run by default; re-run with
     confirm=true.
 
@@ -722,14 +779,14 @@ def ad_create_image(
     portrait_image_asset_ids: List[str] = [],
     call_to_action_text: Optional[str] = None,
     tracking_url_template: Optional[str] = None,
-    status: str = "PAUSED",
+    status: _STATUS_ENUM = "PAUSED",
     confirm: bool = False,
 ) -> Dict[str, Any]:
     """Creates a Demand Gen image ad (multi-asset).
 
-    Upload images first with asset_upload_image (landscape 1200x628, square
-    1200x1200, logo 1200x1200) and pass their asset ids. SAFETY: dry-run by
-    default (validate_only); re-run with confirm=true.
+    Upload images first with demandgen_asset_upload_image (landscape
+    1200x628, square 1200x1200, logo 1200x1200) and pass their asset ids.
+    SAFETY: dry-run by default (validate_only); re-run with confirm=true.
 
     Args:
         customer_id: The client account id (digits only, no hyphens).
@@ -744,7 +801,6 @@ def ad_create_image(
         logo_image_asset_ids: 1-5 logo (1:1) image asset ids.
         portrait_image_asset_ids: Optional portrait (4:5) image asset ids.
         call_to_action_text: Optional CTA text, e.g. "Sign up".
-        status: PAUSED (default) or ENABLED.
         confirm: False = dry-run preview (default), True = apply.
     """
     customer_id = _clean_customer_id(customer_id)
@@ -846,7 +902,7 @@ def ad_create_video(
     logo_image_asset_ids: List[str],
     call_to_action: Optional[str] = None,
     tracking_url_template: Optional[str] = None,
-    status: str = "PAUSED",
+    status: _STATUS_ENUM = "PAUSED",
     asset_optimization: Optional[bool] = None,
     shorter_videos: Optional[bool] = None,
     resized_videos: Optional[bool] = None,
@@ -862,9 +918,9 @@ def ad_create_video(
     confirm=true — so the dry-run validates the ad payload WITHOUT the CTA
     asset link and does not fully cover what gets applied.
 
-    Register videos first with asset_create_youtube_video and pass their
-    asset ids. SAFETY: dry-run by default (validate_only); re-run with
-    confirm=true.
+    Register videos first with demandgen_asset_create_youtube_video and
+    pass their asset ids. SAFETY: dry-run by default (validate_only);
+    re-run with confirm=true.
 
     Args:
         customer_id: The client account id (digits only, no hyphens).
@@ -877,7 +933,6 @@ def ad_create_video(
         long_headlines: 1-5 long headlines, max 90 chars.
         descriptions: 1-5 descriptions, max 90 chars.
         logo_image_asset_ids: 1-5 logo image asset ids.
-        status: PAUSED (default) or ENABLED.
         asset_optimization: Master toggle for this ad's "Asset optimization"
             (Demand Gen auto-generated assets). False opts OUT of shorter
             videos, resized/vertical videos and landing page previews; True
@@ -1156,7 +1211,7 @@ def ad_create_carousel(
     cards: List[Dict[str, str]],
     call_to_action_text: Optional[str] = None,
     tracking_url_template: Optional[str] = None,
-    status: str = "PAUSED",
+    status: _STATUS_ENUM = "PAUSED",
     confirm: bool = False,
 ) -> Dict[str, Any]:
     """Creates a Demand Gen carousel ad (2-10 swipeable cards).
@@ -1179,7 +1234,6 @@ def ad_create_carousel(
              "marketing_image_asset_id": "..." (1.91:1, optional),
              "call_to_action_text": "..." (optional)}.
         call_to_action_text: Optional ad-level CTA.
-        status: PAUSED (default) or ENABLED.
         confirm: False = dry-run preview (default), True = apply.
     """
     customer_id = _clean_customer_id(customer_id)

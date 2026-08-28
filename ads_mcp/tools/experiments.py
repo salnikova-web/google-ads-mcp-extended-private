@@ -3,10 +3,10 @@
 
 """Campaign experiments (A/B tests).
 
-Flow: experiment_create (makes experiment + control/treatment arms and
-schedules it — Google copies the control campaign into a treatment
+Flow: experiments_experiment_create (makes experiment + control/treatment
+arms and schedules it — Google copies the control campaign into a treatment
 campaign) -> edit the treatment campaign with the regular tools ->
-experiment_end or experiment_promote.
+experiments_experiment_end or experiments_experiment_promote.
 
 Safety model: ``confirm=False`` = preview only (experiment scheduling has
 side effects that validate_only cannot fully cover, so nothing is sent to
@@ -49,7 +49,8 @@ def experiment_create(
 
     Google copies the control campaign into a treatment campaign and splits
     traffic. After creation, modify the treatment campaign with the regular
-    tools (find its id via experiments_list), then end or promote.
+    tools (find its id via experiments_experiments_list), then end or
+    promote.
 
     SAFETY: with confirm=false nothing is sent to Google Ads, so the preview
     is computed locally and nothing is validated.
@@ -81,7 +82,7 @@ def experiment_create(
     }
     if not confirm:
         return _preview_or_done(
-            False, "experiments_create", preview, validated=False
+            False, "experiments_experiment_create", preview, validated=False
         )
 
     client = utils.get_googleads_client()
@@ -141,10 +142,10 @@ def experiment_create(
     preview["experiment_resource"] = experiment_rn
     preview["note"] = (
         "Scheduled. Google is creating the treatment campaign (may take a "
-        "few minutes). Use experiments_list to see it, then edit the "
-        "treatment campaign with the regular tools."
+        "few minutes). Use experiments_experiments_list to see it, then "
+        "edit the treatment campaign with the regular tools."
     )
-    return _preview_or_done(True, "experiments_create", preview)
+    return _preview_or_done(True, "experiments_experiment_create", preview)
 
 
 @experiments_mcp.tool(annotations=_READ)
@@ -256,7 +257,7 @@ def experiment_end(
     }
     if not confirm:
         return _preview_or_done(
-            False, "experiments_end", details, validated=False
+            False, "experiments_experiment_end", details, validated=False
         )
 
     client = utils.get_googleads_client()
@@ -267,7 +268,7 @@ def experiment_end(
         exp_service.end_experiment(request=request)
     except GoogleAdsException as ex:
         _raise_tool_error(ex)
-    return _preview_or_done(True, "experiments_end", details)
+    return _preview_or_done(True, "experiments_experiment_end", details)
 
 
 @experiments_mcp.tool(
@@ -296,7 +297,7 @@ def experiment_promote(
     }
     if not confirm:
         return _preview_or_done(
-            False, "experiments_promote", details, validated=False
+            False, "experiments_experiment_promote", details, validated=False
         )
 
     client = utils.get_googleads_client()
@@ -310,4 +311,4 @@ def experiment_promote(
     except GoogleAdsException as ex:
         _raise_tool_error(ex)
     details["note"] = "Promotion started (async). Check status in the UI."
-    return _preview_or_done(True, "experiments_promote", details)
+    return _preview_or_done(True, "experiments_experiment_promote", details)

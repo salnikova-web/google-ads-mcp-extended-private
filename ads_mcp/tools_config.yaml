@@ -2,6 +2,18 @@
 #
 # Tools configuration for the Google Ads MCP server.
 # Modify this file to enable/disable tool namespaces or set custom prefixes.
+#
+# This file ships inside the installed package, so edits here need a
+# reinstall (pipx install --force ...) to take effect. To reduce the tool
+# schemas sent to your LLM (or to disable write tools) without touching the
+# install, point the GOOGLE_ADS_MCP_TOOLS_CONFIG environment variable at
+# your own copy instead — that path is read at server startup, so a client
+# restart is enough. See examples/tool_configs/ for ready-made profiles
+# (analytics-readonly, analytics-plus, ops-core) and README-EXTENDED.md for
+# the per-namespace token-cost table they are measured against.
+#
+# The default below keeps every namespace enabled, matching the project's
+# no-filtering-by-default stance.
 
 namespaces:
   customers: true

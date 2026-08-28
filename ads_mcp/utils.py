@@ -318,20 +318,98 @@ def get_gaql_resources_filepath():
     return file_path
 
 
+def truncation_warning(cap: int) -> str:
+    """The standard warning for a list truncated at `cap` items.
+
+    Truncation must never be silent: a missing item is not proof it does
+    not exist, so every truncated list envelope carries this string and
+    every truncating tool's docstring tells the agent to relay it.
+    """
+    return (
+        f"list truncated at {cap} items — more exist beyond the cap; a "
+        "missing item is NOT proof it does not exist. Raise 'limit' or "
+        "narrow the filter before concluding absence, and tell the user "
+        "the list is incomplete."
+    )
+
+
+def list_envelope(items: list[Any], cap: int) -> dict[str, Any]:
+    """Wraps a probe-fetched list into the shared truncation envelope.
+
+    `items` must already hold at most `cap + 1` rows (the caller fetches
+    one extra "probe" row to detect overflow without a separate count
+    query). Returns {"items", "returned", "truncated"} and, only when
+    truncated, a "warning" key from `truncation_warning`.
+    """
+    truncated = len(items) > cap
+    page = items[:cap] if truncated else items
+    envelope: dict[str, Any] = {
+        "items": page,
+        "returned": len(page),
+        "truncated": truncated,
+    }
+    if truncated:
+        envelope["warning"] = truncation_warning(cap)
+    return envelope
+
+
 # Matched as substrings against "<error_code> <message>" uppercased; each
 # matching hint is appended once to the raised ToolError.
+#
+# The first block keys on specific field names taken verbatim from real
+# server logs: each of these was requested repeatedly across sessions,
+# each failed the same way every time, and the generic "verify the field
+# names" hint below never told the agent what to reach for instead. They
+# come first so the specific advice is printed before the generic one.
 _GOOGLE_ADS_ERROR_HINTS = (
     (
+        # "Unrecognized field(s) in the query: 'campaign.start_date'[,
+        # 'campaign.end_date']." - 8 occurrences.
+        "'CAMPAIGN.START_DATE'",
+        "campaign.start_date / campaign.end_date are not selectable - as "
+        "a FILTER use segments.date conditions instead; as an ATTRIBUTE "
+        "(the campaign's own launch date) look the campaign resource's "
+        "real fields up with the metadata_get_resource_metadata tool - "
+        "do not derive a launch date from metrics",
+    ),
+    (
+        # "Unrecognized fields in the query: 'auction_insight.domain',
+        # ..." - every auction_insight attempt, with metrics.* prefixes
+        # too. The resource is not in the queryable resource list.
+        "'AUCTION_INSIGHT.",
+        "auction_insight is not a queryable GAQL resource in this API "
+        "version - there is no search equivalent, Auction Insights has "
+        "to be exported from the Google Ads UI",
+    ),
+    (
+        # "Unrecognized field in the query: 'metrics.video_views'." -
+        # seen on both the asset and the campaign resource.
+        "'METRICS.VIDEO_VIEWS'",
+        "metrics.video_views is not selectable for this resource - list "
+        "the metrics the resource actually supports with the "
+        "metadata_get_resource_metadata tool before re-querying",
+    ),
+    (
+        # "Unrecognized field in the query:
+        # 'campaign.url_expansion_opt_out'."
+        "'CAMPAIGN.URL_EXPANSION_OPT_OUT'",
+        "campaign.url_expansion_opt_out is not a selectable campaign "
+        "field in this API version - look the campaign resource's real "
+        "fields up with the metadata_get_resource_metadata tool rather "
+        "than guessing the PMax URL-expansion setting's name",
+    ),
+    (
         "UNRECOGNIZED_FIELD",
-        "verify field names with the get_resource_metadata tool",
+        "verify field names with the metadata_get_resource_metadata tool",
     ),
     (
         "INVALID_FIELD",
-        "verify field names with the get_resource_metadata tool",
+        "verify field names with the metadata_get_resource_metadata tool",
     ),
     (
         "PROHIBITED_FIELD",
-        "check field compatibility with the get_resource_metadata tool",
+        "check field compatibility with the metadata_get_resource_metadata "
+        "tool",
     ),
     (
         "AUTHENTICATION",

@@ -45,6 +45,8 @@ namespaces:
   search: "query"
 
   # Option 3: Fine-grained control over tools in a category
+  # (list every tool you want enabled — any tool left out of
+  # enabled_tools, e.g. get_field_details below, stays disabled)
   metadata:
     enabled: true
     prefix: "metadata"
@@ -54,7 +56,7 @@ namespaces:
 
 #### Opt-in profiles
 
-The default configuration enables all 16 namespaces (100 tools). If you do not
+The default configuration enables all 16 namespaces (101 tools). If you do not
 need the full surface — for reporting-only use, or to reduce the tool schemas
 sent to your LLM on every request — save one of the profiles below to a file
 and point `GOOGLE_ADS_MCP_TOOLS_CONFIG` at it.

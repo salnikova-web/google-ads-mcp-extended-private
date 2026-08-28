@@ -58,16 +58,23 @@ def geo_lookup(
     country_code: Optional[str] = None,
     locale: str = "en",
 ) -> List[Dict[str, Any]]:
-    """Finds geo target ids by location names (countries, cities, regions).
+    """Find geo target constant ids by location name.
 
-    Use the returned ids with set_locations.
+    WHEN TO USE: before targeting_set_locations or
+    targeting_set_locations_ad_group, which take ids, not names.
+    PRECONDITIONS: none — read-only and account-independent (no
+    customer_id).
+    SIDE EFFECTS: none. An ambiguous name returns several rows, so check
+    canonical_name before using an id.
+    UNITS & IDS: "id" is a geo target constant id (2276 = Germany), not an
+    account id.
 
     Args:
         location_names: Names to look up, e.g. ["Germany", "Berlin",
             "United States"].
-        country_code: Optional 2-letter country filter, e.g. "DE"
-            (recommended when looking up cities).
-        locale: Language of the names (default "en").
+        country_code: 2-letter country filter, e.g. "DE" (recommended when
+            looking up cities).
+        locale: Language the names are written in (default "en").
     """
     client = utils.get_googleads_client()
     geo_service = utils.get_googleads_service("GeoTargetConstantService")
@@ -108,16 +115,24 @@ def set_locations(
     negative: bool = False,
     confirm: bool = False,
 ) -> Dict[str, Any]:
-    """Adds location targeting (or exclusions) to a campaign.
+    """Add location targeting (or exclusions) at CAMPAIGN level.
 
-    Find location ids first with geo_lookup. SAFETY: dry-run by default
-    (validate_only); re-run with confirm=true.
+    WHEN TO USE: any campaign type except Demand Gen with
+    upgraded_targeting=true, where geo lives on the ad group
+    (targeting_set_locations_ad_group).
+    PRECONDITIONS: ids from targeting_geo_lookup; the campaign must exist.
+    SIDE EFFECTS: ADDS criteria, never replaces the set — the campaign
+    targets the union; drop old ones with targeting_remove_criterion. The
+    FIRST positive location narrows it from "everywhere" to that one.
+    DRY-RUN: confirm=false (default) validates remotely, changes nothing;
+    confirm=true applies.
+    UNITS & IDS: geo target constant ids (2276 = Germany), not account ids.
 
     Args:
         customer_id: The client account id (digits only, no hyphens).
         campaign_id: The numeric id of the campaign.
-        location_ids: Geo target constant ids (e.g. 2276 = Germany).
-        negative: True to EXCLUDE these locations instead of targeting.
+        location_ids: Geo target constant ids from targeting_geo_lookup.
+        negative: True to EXCLUDE these locations instead of targeting them.
         confirm: False = dry-run preview (default), True = apply.
     """
     customer_id = _clean_customer_id(customer_id)
@@ -188,10 +203,16 @@ def set_languages(
     language_codes: List[str],
     confirm: bool = False,
 ) -> Dict[str, Any]:
-    """Adds language targeting to a campaign.
+    """Add language targeting to a campaign.
 
-    Looks up language ids by their codes automatically. SAFETY: dry-run by
-    default (validate_only); re-run with confirm=true.
+    WHEN TO USE: restricting to users whose Google interface language
+    matches. It does NOT translate ads or filter by query language.
+    PRECONDITIONS: codes are resolved to language constants first, so an
+    unknown code fails the call before anything is written.
+    SIDE EFFECTS: ADDS criteria, never replaces the set — drop old ones
+    with targeting_remove_criterion.
+    DRY-RUN: confirm=false (default) validates remotely, changes nothing;
+    confirm=true applies.
 
     Args:
         customer_id: The client account id (digits only, no hyphens).
@@ -264,17 +285,24 @@ def set_ad_schedule(
     schedule: List[Dict[str, Any]],
     confirm: bool = False,
 ) -> Dict[str, Any]:
-    """Adds an ad schedule (dayparting) to a campaign.
+    """Add an ad schedule (dayparting) to a campaign.
 
-    Once a schedule exists, ads serve ONLY during the listed windows.
-    SAFETY: dry-run by default (validate_only); re-run with confirm=true.
+    WHEN TO USE: limiting when a campaign serves. Skip it while Smart
+    Bidding is learning — every hour cut is data lost.
+    PRECONDITIONS: the campaign must exist (mutate_list_campaigns).
+    SIDE EFFECTS: once ANY schedule exists the campaign serves ONLY inside
+    the listed windows, so the first call silently ends 24/7 serving.
+    Windows are ADDED, never replaced (targeting_remove_criterion).
+    DRY-RUN: confirm=false (default) validates remotely, changes nothing;
+    confirm=true applies.
+    UNITS & IDS: hours 0-24 in the ACCOUNT timezone, full hours only.
 
     Args:
         customer_id: The client account id (digits only, no hyphens).
         campaign_id: The numeric id of the campaign.
-        schedule: List of windows, each:
-            {"day": "MONDAY", "start_hour": 8, "end_hour": 22}.
-            Hours are 0-24 in the account timezone; full hours only.
+        schedule: Windows shaped
+            {"day": "MONDAY", "start_hour": 8, "end_hour": 22}; day must be
+            MONDAY..SUNDAY and 0 <= start_hour < end_hour <= 24.
         confirm: False = dry-run preview (default), True = apply.
     """
     customer_id = _clean_customer_id(customer_id)
@@ -337,10 +365,16 @@ def remove_criterion(
     criterion_ids: List[str],
     confirm: bool = False,
 ) -> Dict[str, Any]:
-    """Removes campaign criteria (locations, languages, schedule windows).
+    """Remove campaign criteria (locations, languages, schedule windows).
 
-    Find criterion ids with list_criteria. SAFETY: dry-run by default;
-    re-run with confirm=true.
+    WHEN TO USE: replacing a targeting set — the set_* tools only ADD.
+    Ad-group keywords: mutate_keywords_remove.
+    PRECONDITIONS: criterion ids from targeting_list_criteria; they are per
+    campaign, and a truncated list is not proof one is gone.
+    SIDE EFFECTS: IRREVERSIBLE. Removing the LAST positive location widens
+    the campaign back to "everywhere", so add the replacement first.
+    DRY-RUN: confirm=false (default) validates remotely, changes nothing;
+    confirm=true applies.
 
     Args:
         customer_id: The client account id (digits only, no hyphens).
@@ -390,13 +424,15 @@ def list_criteria(
     campaign_id: str,
     limit: int = 500,
 ) -> Dict[str, Any]:
-    """Lists campaign targeting criteria: locations, languages, schedule.
+    """List campaign targeting criteria: locations, languages, schedule.
 
-    Returns the criterion ids needed for remove_criterion, as
-    {"items": [...], "returned": n, "truncated": bool}. When truncated is
-    true the campaign has more criteria than limit, so an id missing from
-    items means "not listed", NOT "does not exist" — raise limit before
-    concluding a criterion is already gone.
+    WHEN TO USE: before targeting_remove_criterion (it needs criterion ids)
+    or to check what a campaign already targets. Only LOCATION, LANGUAGE
+    and AD_SCHEDULE rows are returned.
+    Returns {"items": [...], "returned": n, "truncated": bool}. When
+    truncated is true the campaign has more criteria than limit, so an id
+    missing from items means "not listed", NOT "does not exist" — raise
+    limit before concluding a criterion is already gone.
 
     Args:
         customer_id: The client account id (digits only, no hyphens).
@@ -466,6 +502,16 @@ _AGE_RANGES = {
 }
 _GENDERS = ("MALE", "FEMALE", "UNDETERMINED")
 _DEVICES = ("MOBILE", "TABLET", "DESKTOP", "CONNECTED_TV")
+_TARGETING_DIMENSIONS = (
+    "KEYWORD",
+    "AUDIENCE",
+    "TOPIC",
+    "GENDER",
+    "AGE_RANGE",
+    "PLACEMENT",
+    "PARENTAL_STATUS",
+    "INCOME_RANGE",
+)
 
 
 @targeting_mcp.tool(annotations=_WRITE)
@@ -477,12 +523,17 @@ def set_demographics(
     exclude_genders: List[str] = [],
     confirm: bool = False,
 ) -> Dict[str, Any]:
-    """Excludes age ranges and/or genders at ad-group OR campaign level.
+    """Exclude age ranges and/or genders at ad-group OR campaign level.
 
-    Pass ad_group_id for Search/Display, or campaign_id for Performance Max
-    (PMax exclusions live at campaign level). Exactly one is required.
-
-    SAFETY: dry-run by default (validate_only); re-run with confirm=true.
+    WHEN TO USE: EXCLUSIONS only — it cannot target a demographic
+    positively. Pass ad_group_id for Search/Display or campaign_id for
+    PMax (its exclusions are campaign-level); exactly one is required.
+    PRECONDITIONS: pass at least one of exclude_age_ranges /
+    exclude_genders; re-excluding is a duplicate.
+    SIDE EFFECTS: cuts reach. UNDETERMINED covers everyone Google could not
+    classify, so excluding it removes real traffic.
+    DRY-RUN: confirm=false (default) validates remotely, changes nothing;
+    confirm=true applies.
 
     Args:
         customer_id: The client account id (digits only, no hyphens).
@@ -575,10 +626,17 @@ def set_device_bid_modifiers(
     modifiers: Dict[str, float],
     confirm: bool = False,
 ) -> Dict[str, Any]:
-    """Sets device bid modifiers on a campaign.
+    """Set device bid modifiers on a campaign.
 
-    Modifier 1.0 = no change, 1.2 = +20%, 0.8 = -20%, 0 = exclude the
-    device. SAFETY: dry-run by default; re-run with confirm=true.
+    WHEN TO USE: shifting spend between devices on a campaign that bids
+    per click. Smart Bidding mostly ignores them except the 0 exclusion.
+    PRECONDITIONS: the campaign must exist; re-sending a device that
+    already has a modifier is a duplicate.
+    SIDE EFFECTS: a modifier of 0 EXCLUDES the device outright, it does not
+    mean "bid nothing".
+    DRY-RUN: confirm=false (default) validates remotely, changes nothing;
+    confirm=true applies.
+    UNITS & IDS: a multiplier — 1.0 none, 1.2 = +20%, 0 = exclude.
 
     Args:
         customer_id: The client account id (digits only, no hyphens).
@@ -637,15 +695,21 @@ def set_frequency_cap(
     time_unit: str = "DAY",
     confirm: bool = False,
 ) -> Dict[str, Any]:
-    """Sets a campaign-level frequency cap (Video / Display / Demand Gen).
+    """Set a campaign-level frequency cap (Video / Display / Demand Gen).
 
-    SAFETY: dry-run by default (validate_only); re-run with confirm=true.
+    WHEN TO USE: capping how often one user sees the ads; Search
+    campaigns do not support caps.
+    PRECONDITIONS: the campaign must exist and be a channel that supports
+    caps, or the API rejects the update.
+    SIDE EFFECTS: REPLACES the whole frequency_caps list — an existing cap
+    is dropped, not merged. The period is always 1 unit long.
+    DRY-RUN: confirm=false (default) validates remotely, changes nothing;
+    confirm=true applies.
 
     Args:
         customer_id: The client account id (digits only, no hyphens).
         campaign_id: The numeric id of the campaign.
-        impressions: Max impressions per user per period (replaces any
-            existing cap).
+        impressions: Max impressions per user per period (>= 1).
         time_unit: DAY, WEEK or MONTH.
         confirm: False = dry-run preview (default), True = apply.
     """
@@ -702,10 +766,16 @@ def set_content_exclusions(
     content_labels: List[str],
     confirm: bool = False,
 ) -> Dict[str, Any]:
-    """Excludes content categories (brand safety) on a campaign
-    (Display / Video / Demand Gen).
+    """Exclude content categories (brand safety) on a campaign.
 
-    SAFETY: dry-run by default (validate_only); re-run with confirm=true.
+    WHEN TO USE: Display / Video / Demand Gen inventory filtering; Search
+    campaigns have no content categories.
+    PRECONDITIONS: the campaign must exist; an unknown label is refused
+    before anything is sent.
+    SIDE EFFECTS: ADDS exclusions, never removes any
+    (targeting_remove_criterion does that); each one shrinks inventory.
+    DRY-RUN: confirm=false (default) validates remotely, changes nothing;
+    confirm=true applies.
 
     Args:
         customer_id: The client account id (digits only, no hyphens).
@@ -766,18 +836,24 @@ def set_locations_ad_group(
     negative: bool = False,
     confirm: bool = False,
 ) -> Dict[str, Any]:
-    """Adds location targeting (or exclusions) at AD GROUP level.
+    """Add location targeting (or exclusions) at AD GROUP level.
 
-    Needed for Demand Gen campaigns with upgraded_targeting=true (the
-    default for API-created DG campaigns) — there geo lives on ad groups,
-    not the campaign. Find location ids with geo_lookup. SAFETY: dry-run
-    by default (validate_only); re-run with confirm=true.
+    WHEN TO USE: Demand Gen with upgraded_targeting=true (the default for
+    API-created DG campaigns), where geo lives on the ad group and
+    campaign geo is ignored. Everywhere else: targeting_set_locations.
+    PRECONDITIONS: ids from targeting_geo_lookup; the ad group must exist.
+    SIDE EFFECTS: ADDS criteria, never replaces the set. Removing AD-GROUP
+    criteria is not exposed (targeting_remove_criterion is
+    campaign-level) — drop them in the UI.
+    DRY-RUN: confirm=false (default) validates remotely, changes nothing;
+    confirm=true applies.
+    UNITS & IDS: geo target constant ids (2840 = US), not account ids.
 
     Args:
         customer_id: The client account id (digits only, no hyphens).
         ad_group_id: The numeric id of the ad group.
-        location_ids: Geo target constant ids (e.g. 2840 = United States).
-        negative: True to EXCLUDE these locations instead of targeting.
+        location_ids: Geo target constant ids from targeting_geo_lookup.
+        negative: True to EXCLUDE these locations instead of targeting them.
         confirm: False = dry-run preview (default), True = apply.
     """
     customer_id = _clean_customer_id(customer_id)
@@ -828,13 +904,18 @@ def set_ad_group_target_restrictions(
     observation_dimensions: List[str] = [],
     confirm: bool = False,
 ) -> Dict[str, Any]:
-    """Sets the ad group targeting setting: which dimensions RESTRICT reach
-    ("Targeting", bid_only=false) vs are observation-only
-    ("Observation", bid_only=true).
+    """Set which ad group dimensions RESTRICT reach vs only observe.
 
-    Replaces the whole targeting_setting. Valid dimensions: KEYWORD,
-    AUDIENCE, TOPIC, GENDER, AGE_RANGE, PLACEMENT, PARENTAL_STATUS,
-    INCOME_RANGE. SAFETY: dry-run by default; re-run with confirm=true.
+    WHEN TO USE: switching a dimension between "Targeting"
+    (bid_only=false, restricts who sees the ads) and "Observation"
+    (bid_only=true, reporting and bid adjustments only).
+    PRECONDITIONS: pass at least one dimension. Valid: KEYWORD, AUDIENCE,
+    TOPIC, GENDER, AGE_RANGE, PLACEMENT, PARENTAL_STATUS, INCOME_RANGE.
+    SIDE EFFECTS: REPLACES the whole target_restrictions list — anything
+    left out reverts to its default, so send the complete set. Moving a
+    dimension to Targeting can cut reach sharply.
+    DRY-RUN: confirm=false (default) validates remotely, changes nothing;
+    confirm=true applies.
 
     Args:
         customer_id: The client account id (digits only, no hyphens).
@@ -861,8 +942,14 @@ def set_ad_group_target_restrictions(
     ad_group.resource_name = f"customers/{customer_id}/adGroups/{ad_group_id}"
 
     def _restriction(dim: str, bid_only: bool):
+        key = str(dim).upper()
+        if key not in _TARGETING_DIMENSIONS:
+            raise ToolError(
+                f"Unknown targeting dimension '{dim}'; valid: "
+                f"{_TARGETING_DIMENSIONS}"
+            )
         r = client.get_type("TargetRestriction")
-        r.targeting_dimension = client.enums.TargetingDimensionEnum[dim.upper()]
+        r.targeting_dimension = client.enums.TargetingDimensionEnum[key]
         r.bid_only = bid_only
         return r
 

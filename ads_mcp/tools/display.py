@@ -23,11 +23,12 @@ Safety model: identical to ads_mcp.tools.mutate — every write tool accepts
 """
 
 import time
-from typing import Any, Dict, List, Optional
+from typing import Annotated, Any, Dict, List, Optional
 
 from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
 from mcp.types import ToolAnnotations
+from pydantic import Field
 from google.ads.googleads.errors import GoogleAdsException
 
 import ads_mcp.utils as utils
@@ -42,6 +43,27 @@ display_mcp = FastMCP("display")
 
 _WRITE = ToolAnnotations(readOnlyHint=False, destructiveHint=False)
 
+# Schema-only aliases: advertise the accepted values in tools/list via
+# json_schema_extra while runtime validation stays the existing lax
+# .upper() + explicit ToolError checks (a true Literal would reject
+# lowercase input that works today).
+_STATUS_ENUM = Annotated[
+    str, Field(json_schema_extra={"enum": ["PAUSED", "ENABLED"]})
+]
+_BIDDING_ENUM = Annotated[
+    str,
+    Field(
+        json_schema_extra={
+            "enum": [
+                "MAXIMIZE_CONVERSIONS",
+                "MAXIMIZE_CONVERSION_VALUE",
+                "MAXIMIZE_CLICKS",
+                "MANUAL_CPC",
+            ]
+        }
+    ),
+]
+
 
 def _check_len(items: List[str], max_len: int, label: str) -> None:
     bad = [i for i in items if len(i) > max_len]
@@ -54,12 +76,12 @@ def campaign_create(
     customer_id: str,
     name: str,
     daily_budget: float,
-    bidding_strategy: str = "MAXIMIZE_CONVERSIONS",
+    bidding_strategy: _BIDDING_ENUM = "MAXIMIZE_CONVERSIONS",
     target_cpa: Optional[float] = None,
     target_roas: Optional[float] = None,
     tracking_url_template: Optional[str] = None,
     final_url_suffix: Optional[str] = None,
-    status: str = "PAUSED",
+    status: _STATUS_ENUM = "PAUSED",
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
     confirm: bool = False,
@@ -69,7 +91,8 @@ def campaign_create(
     Optional tracking_url_template / final_url_suffix set UTM tracking at
     creation (recommended for web funnels). NOTE: the campaign is
     created with ACCOUNT-DEFAULT conversion goals — attach the product's
-    custom goal with campaign_set_custom_conversion_goal right after.
+    custom goal with mutate_campaign_set_custom_conversion_goal right
+    after.
 
     SAFETY: dry-run by default (validate_only); re-run with confirm=true.
     Created PAUSED by default.
@@ -83,7 +106,9 @@ def campaign_create(
             MAXIMIZE_CLICKS or MANUAL_CPC.
         target_cpa: Optional target CPA in account currency.
         target_roas: Optional target ROAS as decimal.
-        status: PAUSED (default) or ENABLED.
+        start_date: "YYYY-MM-DD" (dashes required), account timezone;
+            defaults to today.
+        end_date: "YYYY-MM-DD" (dashes required), inclusive; omit for none.
         confirm: False = dry-run preview (default), True = apply.
     """
     customer_id = _clean_customer_id(customer_id)
@@ -201,7 +226,7 @@ def ad_group_create(
     campaign_id: str,
     name: str,
     cpc_bid: Optional[float] = None,
-    status: str = "PAUSED",
+    status: _STATUS_ENUM = "PAUSED",
     confirm: bool = False,
 ) -> Dict[str, Any]:
     """Creates a DISPLAY_STANDARD ad group in a Display campaign.
@@ -213,7 +238,6 @@ def ad_group_create(
         campaign_id: The numeric id of the Display campaign.
         name: Ad group name.
         cpc_bid: Optional max CPC in account currency.
-        status: PAUSED (default) or ENABLED.
         confirm: False = dry-run preview (default), True = apply.
     """
     customer_id = _clean_customer_id(customer_id)
@@ -271,7 +295,7 @@ def ad_create_responsive(
     youtube_video_asset_ids: List[str] = [],
     call_to_action_text: Optional[str] = None,
     tracking_url_template: Optional[str] = None,
-    status: str = "PAUSED",
+    status: _STATUS_ENUM = "PAUSED",
     confirm: bool = False,
 ) -> Dict[str, Any]:
     """Creates a Responsive Display Ad (RDA).
@@ -293,7 +317,6 @@ def ad_create_responsive(
         logo_image_asset_ids: Optional logos (1:1 or 4:1).
         youtube_video_asset_ids: Optional YouTube video asset ids.
         call_to_action_text: Optional CTA text.
-        status: PAUSED (default) or ENABLED.
         confirm: False = dry-run preview (default), True = apply.
     """
     customer_id = _clean_customer_id(customer_id)

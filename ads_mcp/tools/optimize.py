@@ -35,8 +35,13 @@ _READ = ToolAnnotations(readOnlyHint=True)
 def recommendations_list(
     customer_id: str,
     limit: int = 50,
-) -> List[Dict[str, Any]]:
-    """Lists Google's optimization recommendations for the account.
+) -> Dict[str, Any]:
+    """Lists Google's optimization recommendations; envelope, not a bare
+    list.
+
+    Returns {items, returned, truncated, warning?}. If truncated: raise
+    limit before concluding a recommendation type is absent, and tell the
+    user the list is incomplete.
 
     Args:
         customer_id: The client account id (digits only, no hyphens).
@@ -44,14 +49,16 @@ def recommendations_list(
     """
     customer_id = _clean_customer_id(customer_id)
     ga_service = utils.get_googleads_service("GoogleAdsService")
+    cap = int(limit)
     query = (
         "SELECT recommendation.resource_name, recommendation.type, "
         "recommendation.dismissed, recommendation.campaign "
-        f"FROM recommendation LIMIT {int(limit)}"
+        "FROM recommendation ORDER BY recommendation.resource_name "
+        f"LIMIT {cap + 1}"
     )
     try:
         rows = ga_service.search(customer_id=customer_id, query=query)
-        return [
+        items = [
             {
                 "resource_name": row.recommendation.resource_name,
                 "type": row.recommendation.type_.name,
@@ -60,6 +67,7 @@ def recommendations_list(
             }
             for row in rows
         ]
+        return utils.list_envelope(items, cap)
     except GoogleAdsException as ex:
         _raise_tool_error(ex)
 
@@ -70,12 +78,18 @@ def recommendation_apply(
     resource_names: List[str],
     confirm: bool = False,
 ) -> Dict[str, Any]:
-    """Applies Google recommendations (with their default parameters).
+    """Apply Google recommendations with their DEFAULT parameters.
 
-    Get resource_names from recommendations_list. NOTE: applying budget or
-    bidding recommendations CAN increase spend — review each one first.
-    With confirm=false nothing is sent to Google Ads, so the preview is
-    computed locally and nothing is validated.
+    WHEN TO USE: only after reading each recommendation. To make one go
+    away without acting: optimize_recommendation_dismiss.
+    PRECONDITIONS: resource_names from optimize_recommendations_list; they
+    go stale, and a withdrawn recommendation fails on apply.
+    SIDE EFFECTS: each one applies its own change — budget and bidding ones
+    CAN INCREASE SPEND at once, and nothing here undoes them.
+    DRY-RUN: this endpoint has NO validate_only, so confirm=false (default)
+    sends nothing and only echoes what would be applied — the preview is
+    unvalidated. confirm=true applies.
+    UNITS & IDS: full resource names, not numeric ids.
 
     Args:
         customer_id: The client account id (digits only, no hyphens).
@@ -129,10 +143,18 @@ def recommendation_dismiss(
     resource_names: List[str],
     confirm: bool = False,
 ) -> Dict[str, Any]:
-    """Dismisses Google recommendations (removes them from the list).
+    """Dismiss Google recommendations (hide them from the list).
 
-    With confirm=false nothing is sent to Google Ads, so the preview is
-    computed locally and nothing is validated.
+    WHEN TO USE: clearing suggestions that do not fit the account. To act
+    on one instead: optimize_recommendation_apply.
+    PRECONDITIONS: resource_names from optimize_recommendations_list
+    (dismissed ones come back with dismissed=true).
+    SIDE EFFECTS: changes nothing in the campaigns, only hides the
+    recommendation; Google may re-raise it later.
+    DRY-RUN: this endpoint has NO validate_only, so confirm=false (default)
+    sends nothing and only echoes what would be dismissed — the preview
+    is unvalidated. confirm=true dismisses.
+    UNITS & IDS: full resource names, not numeric ids.
 
     Args:
         customer_id: The client account id (digits only, no hyphens).
@@ -234,12 +256,19 @@ def change_history(
     limit: int = 100,
     manual_only: bool = False,
     include_values: bool = True,
-) -> List[Dict[str, Any]]:
-    """Shows recent changes in the account: who changed what and when.
+) -> Dict[str, Any]:
+    """Shows recent account changes (who/what/when); envelope, not a bare
+    list.
 
     Each row also reports HOW the change was made (``via``: e.g.
     ``GOOGLE_ADS_WEB_CLIENT`` = a manual change in the UI, ``GOOGLE_ADS_API``,
     ``GOOGLE_ADS_SCRIPTS``, ``GOOGLE_ADS_BULK_UPLOAD``, ``GOOGLE_ADS_EDITOR``).
+    Returns {items, returned, truncated, warning?}. change_event itself
+    serves at most 10000 rows regardless of limit; when that API cap (not
+    the requested limit) is what cut the list, the warning names the API
+    cap and says to narrow change_date_time instead of raising limit.
+    Either way, if truncated: tell the user the list is incomplete before
+    concluding a change did not happen.
 
     Args:
         customer_id: The client account id (digits only, no hyphens).
@@ -256,7 +285,7 @@ def change_history(
     """
     customer_id = _clean_customer_id(customer_id)
     days = min(int(days), 30)
-    limit = min(int(limit), 10000)
+    cap = min(int(limit), 10000)
     now = datetime.datetime.now()
     start = now - datetime.timedelta(days=days)
     # The API rejects a start strictly older than 30 days (START_DATE_TOO_OLD);
@@ -287,11 +316,17 @@ def change_history(
     if include_values:
         fields += ", change_event.old_resource, change_event.new_resource"
 
+    # change_event hard-caps LIMIT at 10000 (rejects anything higher), so
+    # the cap+1 probe row degrades into that ceiling the same way
+    # search.py's does for this resource.
+    api_capped = cap + 1 > 10000
+    fetch_limit = min(cap + 1, 10000)
+
     ga_service = utils.get_googleads_service("GoogleAdsService")
     query = (
         f"SELECT {fields} "
         f"FROM change_event {where} "
-        f"ORDER BY change_event.change_date_time DESC LIMIT {limit}"
+        f"ORDER BY change_event.change_date_time DESC LIMIT {fetch_limit}"
     )
     try:
         rows = ga_service.search(customer_id=customer_id, query=query)
@@ -315,9 +350,20 @@ def change_history(
                     paths,
                 )
             result.append(item)
-        return result
     except GoogleAdsException as ex:
         _raise_tool_error(ex)
+
+    if api_capped and len(result) == 10000:
+        return {
+            "items": result,
+            "returned": len(result),
+            "truncated": True,
+            "warning": (
+                "change_event serves at most 10000 rows — narrow "
+                "change_date_time instead of raising limit"
+            ),
+        }
+    return utils.list_envelope(result, cap)
 
 
 def _seasonality_like_create(
@@ -377,21 +423,28 @@ def seasonality_adjustment_create(
     campaign_ids: List[str] = [],
     confirm: bool = False,
 ) -> Dict[str, Any]:
-    """Creates a seasonality adjustment: tells Smart Bidding to expect a
-    temporary conversion-rate change (e.g. a sale) for a short period
-    (1-7 days recommended, max 14).
+    """Warn Smart Bidding about a short conversion-rate change.
 
-    SAFETY: dry-run by default; re-run with confirm=true.
+    WHEN TO USE: a known short event that moves conversion rate (a sale).
+    To make bidding IGNORE a period instead (outage, bad data):
+    optimize_data_exclusion_create.
+    PRECONDITIONS: 1-7 days recommended, 14 max; longer periods are what
+    bidding is expected to learn on its own.
+    SIDE EFFECTS: changes bidding for the whole period, so a wrong estimate
+    moves spend for real. Scope is the WHOLE ACCOUNT when campaign_ids is
+    empty.
+    DRY-RUN: confirm=false (default) validates remotely, changes nothing;
+    confirm=true applies.
+    UNITS & IDS: date-times "YYYY-MM-DD HH:MM:SS" in the ACCOUNT timezone.
 
     Args:
         customer_id: The client account id (digits only, no hyphens).
         name: Adjustment name.
-        start_date_time: "YYYY-MM-DD HH:MM:SS" in account timezone.
-        end_date_time: "YYYY-MM-DD HH:MM:SS".
-        expected_conversion_rate_change_percent: e.g. 30 = +30% CR expected,
-            -20 = -20%. Converted to modifier automatically (30 -> 1.3).
-        campaign_ids: Optional list to scope to specific campaigns;
-            omit for the whole account.
+        start_date_time: "YYYY-MM-DD HH:MM:SS", account timezone.
+        end_date_time: "YYYY-MM-DD HH:MM:SS", account timezone.
+        expected_conversion_rate_change_percent: 30 = +30% expected, -20 =
+            -20%; converted to a modifier (30 -> 1.3). Range -90 to 900.
+        campaign_ids: Campaigns to scope to; omit for the whole account.
         confirm: False = dry-run preview (default), True = apply.
     """
     customer_id = _clean_customer_id(customer_id)
@@ -435,18 +488,25 @@ def data_exclusion_create(
     campaign_ids: List[str] = [],
     confirm: bool = False,
 ) -> Dict[str, Any]:
-    """Creates a data exclusion: tells Smart Bidding to IGNORE conversion
-    data from a period (tracking outage, site downtime, data anomaly).
+    """Tell Smart Bidding to IGNORE conversion data from a period.
 
-    SAFETY: dry-run by default; re-run with confirm=true.
+    WHEN TO USE: the data itself is wrong — tracking outage, downtime, a
+    conversion anomaly. When conversion rate genuinely changed:
+    optimize_seasonality_adjustment_create.
+    PRECONDITIONS: cover only the broken window; excluding good data throws
+    away learning.
+    SIDE EFFECTS: bidding stops counting conversions from that window
+    permanently. Scope is the WHOLE ACCOUNT when campaign_ids is empty.
+    DRY-RUN: confirm=false (default) validates remotely, changes nothing;
+    confirm=true applies.
+    UNITS & IDS: date-times "YYYY-MM-DD HH:MM:SS" in the ACCOUNT timezone.
 
     Args:
         customer_id: The client account id (digits only, no hyphens).
         name: Exclusion name.
-        start_date_time: "YYYY-MM-DD HH:MM:SS" in account timezone.
-        end_date_time: "YYYY-MM-DD HH:MM:SS".
-        campaign_ids: Optional list to scope to specific campaigns;
-            omit for the whole account.
+        start_date_time: "YYYY-MM-DD HH:MM:SS", account timezone.
+        end_date_time: "YYYY-MM-DD HH:MM:SS", account timezone.
+        campaign_ids: Campaigns to scope to; omit for the whole account.
         confirm: False = dry-run preview (default), True = apply.
     """
     customer_id = _clean_customer_id(customer_id)
@@ -479,14 +539,20 @@ def label_create(
     name: str,
     confirm: bool = False,
 ) -> Dict[str, Any]:
-    """Creates a label (for marking campaigns/ad groups, useful for
-    automation bookkeeping).
+    """Create a label for marking campaigns and ad groups.
 
-    SAFETY: dry-run by default; re-run with confirm=true.
+    WHEN TO USE: bookkeeping — tagging what an automation touched.
+    Attaching is a separate step, optimize_label_apply.
+    PRECONDITIONS: label names are unique per account; a duplicate is
+    rejected by the API.
+    SIDE EFFECTS: creates the label only — nothing serves differently until
+    it is applied to something.
+    DRY-RUN: confirm=false (default) validates remotely, changes nothing;
+    confirm=true applies.
 
     Args:
         customer_id: The client account id (digits only, no hyphens).
-        name: Label name (unique).
+        name: Label name (unique within the account).
         confirm: False = dry-run preview (default), True = apply.
     """
     customer_id = _clean_customer_id(customer_id)
@@ -520,10 +586,17 @@ def label_apply(
     ad_group_ids: List[str] = [],
     confirm: bool = False,
 ) -> Dict[str, Any]:
-    """Applies an existing label to campaigns and/or ad groups.
+    """Apply an existing label to campaigns and/or ad groups.
 
-    Find label ids via search on resource `label`. SAFETY: dry-run by
-    default; re-run with confirm=true.
+    WHEN TO USE: after optimize_label_create. Removing a label is not
+    exposed here.
+    PRECONDITIONS: pass campaign_ids and/or ad_group_ids or the call is
+    refused; label ids from search_search on resource label.
+    SIDE EFFECTS: metadata only, nothing serves differently. Campaigns and
+    ad groups go as TWO requests, so on apply one can succeed while the
+    other fails.
+    DRY-RUN: confirm=false (default) validates remotely, changes nothing;
+    confirm=true applies.
 
     Args:
         customer_id: The client account id (digits only, no hyphens).
