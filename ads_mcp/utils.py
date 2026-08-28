@@ -377,4 +377,9 @@ def raise_tool_error(ex) -> None:
                 hints.append(hint)
     lines = [f"Request ID: {ex.request_id}"] + error_msgs
     lines.extend(f"Hint: {hint}." for hint in hints)
-    raise ToolError("\n".join(lines))
+    message = "\n".join(lines)
+    # The host records only the tool name when a call fails, so the reason
+    # never reaches the server log. Record it here: request id, error codes
+    # and field paths, none of which carry credentials.
+    logger.warning("google-ads tool error:\n%s", message)
+    raise ToolError(message)

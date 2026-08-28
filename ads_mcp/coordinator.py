@@ -26,6 +26,8 @@ from fastmcp.server.auth.providers.google import GoogleProvider
 from fastmcp.server.providers import FastMCPProvider
 from fastmcp.server.transforms import Transform
 
+from ads_mcp.middleware import GoogleAdsErrorMiddleware
+
 _CLIENT_ID = os.environ.get("GOOGLE_ADS_MCP_OAUTH_CLIENT_ID")
 _CLIENT_SECRET = os.environ.get("GOOGLE_ADS_MCP_OAUTH_CLIENT_SECRET")
 _BASE_URL = os.environ.get("GOOGLE_ADS_MCP_BASE_URL", "http://localhost:8080")
@@ -81,6 +83,16 @@ def initialize_and_mount_tools(parent_mcp: FastMCP) -> None:
     import importlib
     import pkgutil
     import ads_mcp.tools as tools_pkg
+
+    # One error translator for the whole server: it runs on the parent's
+    # tools/call chain, so it covers every namespace mounted below, including
+    # tools that do no error handling of their own. Re-mounting an already
+    # initialized server must not stack a second copy.
+    if not any(
+        isinstance(existing, GoogleAdsErrorMiddleware)
+        for existing in parent_mcp.middleware
+    ):
+        parent_mcp.add_middleware(GoogleAdsErrorMiddleware())
 
     # Map of category name -> FastMCP sub-server
     sub_servers = {}
