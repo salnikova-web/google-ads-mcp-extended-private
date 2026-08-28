@@ -62,9 +62,9 @@ python -m unittest tests.tools.mutate_test.КЛАС.тест   # один тес
 - Смоук-тести діфляться з `tests/smoke/golden_tools_list.json`. Будь-яка
   зміна імені/опису/схеми інструмента ламає їх, поки не перегенеровано:
   `python tests/smoke/generate_golden.py` — запускати ОДИН раз, останнім,
-  після всіх правок схем. Скрипт має безумовний `import google.genai`
-  (потрібен встановлений пакет). Вичистити `GOOGLE_ADS_MCP_TOOLS_CONFIG`
-  з env, інакше goldens недетерміновані.
+  після всіх правок схем (import google.genai у скрипті guarded; env
+  `GOOGLE_ADS_MCP_TOOLS_CONFIG` smoke_utils пінить сам — недетермінізм
+  goldens закритий).
 - `coordinator.py` монтує інструменти при імпорті — тести патчать
   `ToolsConfig.load` і кличуть `initialize_and_mount_tools` на свіжому
   FastMCP.
@@ -83,8 +83,10 @@ python -m unittest tests.tools.mutate_test.КЛАС.тест   # один тес
   наявних `is not None` гілок і тільки leaf-шляхами (не-leaf → 
   `FieldMaskError.FIELD_HAS_SUBFIELDS`). Безумовний `paths=[...]` зітре
   поля, які користувач не передавав.
-- `_WRITE_ANNOTATIONS` оголошено окремо в кожному write-модулі (13 шт.) —
-  правка константи зачіпає всі ~15 інструментів файлу.
+- `_WRITE_ANNOTATIONS` та спільні write-хелпери централізовано в
+  `ads_mcp/tools/_write_common.py` (mutate.py ре-експортує) — правка
+  константи зачіпає ВСІ ~98 write-інструментів одразу; дубль-копії ловить
+  інваріант-тест у write_invariants_test.py.
 - `search.py` — навмисний raw read-only passthrough GAQL, НЕ вразливість.
   Решта write-шляхів екранують через `gaql_str()`/`gaql_id()`.
 - Кеш клієнта: ніколи argless `lru_cache` (у hosted-режимі віддасть виклик
