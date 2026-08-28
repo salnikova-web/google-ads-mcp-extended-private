@@ -3,8 +3,8 @@
 ## Overview
 
 This repository extends the read-only Google Ads MCP server with **write
-tools** for campaign management. The server exposes **98 tools** across 16
-namespaces: 16 read-only tools (reporting, lookups and listings) and 82 write
+tools** for campaign management. The server exposes **100 tools** across 16
+namespaces: 16 read-only tools (reporting, lookups and listings) and 84 write
 tools, all of which default to a dry-run preview (see
 [Safety model](#safety-model)).
 
@@ -59,6 +59,14 @@ Every preview states which guarantee it carries: the result includes
 `"validated": true` when Google Ads validated the request, and
 `"validated": false` when no request was sent.
 
+The tools that send several operations at once (`mutate_keywords_add` and
+the `_batch` tools) have an asymmetric dry-run: the API rejects
+`partial_failure` together with `validate_only`, so the preview is atomic —
+one bad entry fails the whole preview — while the apply runs with
+`partial_failure=true` and some operations can succeed while others fail.
+Their results therefore report per-entry outcomes, and the `_batch` tools
+add `requested` / `succeeded` / `failed` counts.
+
 An accidental change is therefore a two-step mistake at minimum: the
 assistant first shows a preview, and only a second call with `confirm=true`
 touches the account. Tools that can remove objects are annotated with
@@ -106,11 +114,13 @@ Cross-cutting parameters shared by several tools:
 |---|---|
 | `mutate_campaign_create` | Creates a campaign plus a dedicated daily budget. Types: SEARCH, DISPLAY, SHOPPING, VIDEO, PERFORMANCE_MAX, DEMAND_GEN. Bidding: Maximize Conversions (+target CPA), Maximize Conversion Value (+target ROAS), Maximize Clicks, Manual CPC. Created PAUSED by default. |
 | `mutate_campaign_update_status` | Pauses, enables or removes a campaign (ENABLED, PAUSED, REMOVED). |
+| `mutate_campaign_update_status_batch` | Pauses or enables up to 100 campaigns in one request (ENABLED/PAUSED only; REMOVED stays on the single-campaign tool). |
 | `mutate_campaign_set_target_roas` | Sets Target ROAS on a Maximize Conversion Value campaign. |
 | `mutate_campaign_set_merchant` | Links a Merchant Center feed to an existing campaign (PMax/Shopping). |
 | `mutate_campaign_update_settings` | Updates campaign network settings, geo target type and asset automation / AI Max settings. |
 | `mutate_campaign_rename` | Renames an existing campaign. |
 | `mutate_campaign_budget_update` | Changes the daily budget of a campaign; warns when the budget is shared. |
+| `mutate_campaign_budget_update_batch` | Changes the daily budget of up to 100 campaigns in one request; collapses campaigns sharing a budget and rejects conflicting amounts. |
 | `mutate_ad_group_create` | Creates a SEARCH_STANDARD ad group in an existing campaign. |
 | `mutate_ad_group_update` | Updates an ad group: status, max CPC bid and/or name. |
 | `mutate_keywords_ideas` | Read-only: keyword ideas from Google Keyword Planner. |

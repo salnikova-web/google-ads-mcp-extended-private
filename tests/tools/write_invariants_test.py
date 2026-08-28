@@ -124,12 +124,23 @@ class TestValidateOnlySamples(unittest.TestCase):
     # Every write module must appear here (or, when the API offers no
     # validate_only, in mutate_test.TestNoApiDryRuns.CALLS); that coverage
     # is enforced by TestBehavioralSampleCoverage below. Tools are chosen
-    # for a straight path to the mutate call — none of them runs a
-    # pre-write GAQL lookup, so no fake result rows are needed.
+    # for a straight path to the mutate call; the one exception is
+    # campaign_budget_update_batch, which resolves its campaigns first and
+    # is fed the fake lookup row set up in setUp.
     SAMPLES = [
         (mutate.campaign_create, ("1234567890", "Camp", 10.0), {}),
         (mutate.ad_group_update, ("1234567890", "111"), {"new_name": "New"}),
         (mutate.keywords_add, ("1234567890", "111", ["kw one"]), {}),
+        (
+            mutate.campaign_update_status_batch,
+            ("1234567890", ["111", "222"], "PAUSED"),
+            {},
+        ),
+        (
+            mutate.campaign_budget_update_batch,
+            ("1234567890", [{"campaign_id": "111", "new_daily_budget": 15.0}]),
+            {},
+        ),
         (
             tracking.campaign_set_tracking,
             ("1234567890", "222"),
@@ -186,6 +197,19 @@ class TestValidateOnlySamples(unittest.TestCase):
             name=f"type:{name}"
         )
         self.service = MagicMock(name="googleads_service")
+        # campaign_budget_update_batch resolves every campaign before it
+        # builds an operation, and refuses the whole batch when one is
+        # missing. Its lookup gets a typed row (int ids and micros, bool
+        # shared flag) so the tool's int()/str() coercions behave as they
+        # do against real proto rows.
+        self.service.search.return_value = [
+            mutate_test.make_budget_row(
+                111,
+                "Camp A",
+                "customers/1234567890/campaignBudgets/1",
+                10_000_000,
+            )
+        ]
         for target, value in (
             ("ads_mcp.utils.get_googleads_client", self.client),
             ("ads_mcp.utils.get_googleads_service", self.service),
