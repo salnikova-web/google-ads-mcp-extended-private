@@ -5,6 +5,11 @@
 .gemini
 .vscode
 
+# Virtual environments
+.venv/
+venv/
+env/
+
 # Distribution / packaging
 .Python
 build/

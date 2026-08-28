@@ -29,6 +29,8 @@ Python MCP-сервер `google-ads-mcp` (FastMCP) для Google Ads API:
   **з-поза директорії репо** — зсередини cwd дає хибний позитив.
 - `claude_desktop_config.json` містить секрети відкритим текстом
   (developer token) — грепати вузько, не тягнути в контекст зайвого.
+- Реліз локально: `nox -s deploy` — гейт (чисте дерево, main, black --check,
+  тести, pipx install, звірка commit_id) + нагадування про ⌘Q.
 
 ## Команди
 
