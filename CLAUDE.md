@@ -110,6 +110,10 @@ python -m unittest tests.tools.mutate_test.КЛАС.тест   # один тес
   `backup/pre-neutralize` несе стару ідентичність авторів.
 - Реліз: branch → PR → merge → tag `vX.Y.Z` → GitHub release → пін
   клієнтського конфігу на `@vX.Y.Z` (не floating main).
+- Кожен реліз-PR бампає version у pyproject.toml до тега vX.Y.Z
+  (інстальована версія має збігатися з тегом).
+- Перед будь-якою зміною видимості репо/публічним форком: `git
+  ls-files CLAUDE.md .claude/` у published tree має бути порожнім.
 
 ## Відомі хвости (не «лагодити» мимохідь, окремі задачі)
 

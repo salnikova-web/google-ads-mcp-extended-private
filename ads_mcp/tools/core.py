@@ -20,10 +20,6 @@ from mcp.types import ToolAnnotations
 
 import ads_mcp.utils as utils
 
-from google.ads.googleads.v24.services.types.customer_service import (
-    ListAccessibleCustomersResponse,
-)
-
 customers_mcp = FastMCP("customers")
 
 
@@ -38,9 +34,7 @@ def list_accessible_customers() -> List[str]:
         List[str]: A list of customer IDs.
     """
     ga_service = utils.get_googleads_service("CustomerService")
-    accessible_customers: ListAccessibleCustomersResponse = (
-        ga_service.list_accessible_customers()
-    )
+    accessible_customers = ga_service.list_accessible_customers()
     # remove customer/ from the start of each resource
     return [
         cust_rn.removeprefix("customers/")

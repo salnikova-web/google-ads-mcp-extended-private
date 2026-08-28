@@ -1,12 +1,12 @@
 [project]
 name = "google-ads-mcp"
-version = "0.1.0"
+version = "0.2.0"
 requires-python = ">=3.10"
 license = "Apache-2.0"
 dependencies = [
-    "google-ads>=31.0.0",
-    "mcp[cli]>=1.2.0",
-    "fastmcp>=3.2.0"
+    "google-ads>=31.0.0,<32",
+    "mcp[cli]>=1.2.0,<2",
+    "fastmcp>=3.2.0,<4"
 ]
 
 description = "MCP Server for Google Ads, depends on Google Ads API."

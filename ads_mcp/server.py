@@ -29,13 +29,43 @@ from ads_mcp.resources import (
 )  # noqa: F401
 
 
+import importlib.metadata
+import json
 import os
+import sys
+
+
+def _build_startup_line() -> str:
+    """Builds the one-line startup banner: "google-ads-mcp <version> (commit <commit>)".
+
+    Both lookups are wrapped in try/except so any failure (a source checkout
+    with no installed distribution metadata, a pip install -e . with no
+    direct_url.json, etc.) degrades that field to "unknown" instead of
+    preventing the server from starting.
+    """
+    try:
+        version = importlib.metadata.version("google-ads-mcp")
+    except Exception:
+        version = "unknown"
+
+    try:
+        direct_url_text = importlib.metadata.distribution(
+            "google-ads-mcp"
+        ).read_text("direct_url.json")
+        commit = json.loads(direct_url_text)["vcs_info"]["commit_id"]
+    except Exception:
+        commit = "unknown"
+
+    return f"google-ads-mcp {version} (commit {commit})"
 
 
 def run_server() -> None:
     _CLIENT_ID = os.environ.get("GOOGLE_ADS_MCP_OAUTH_CLIENT_ID")
     _CLIENT_SECRET = os.environ.get("GOOGLE_ADS_MCP_OAUTH_CLIENT_SECRET")
     port = int(os.environ.get("PORT", "8080"))
+
+    # stdout carries JSON-RPC under the stdio transport; never print here.
+    print(_build_startup_line(), file=sys.stderr)
 
     if _CLIENT_ID and _CLIENT_SECRET:
         mcp.run(

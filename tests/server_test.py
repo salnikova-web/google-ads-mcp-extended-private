@@ -15,6 +15,7 @@
 """Test cases for the server module."""
 
 import unittest
+from unittest.mock import patch
 
 
 class TestUtils(unittest.TestCase):
@@ -29,3 +30,25 @@ class TestUtils(unittest.TestCase):
         from ads_mcp import server
 
         self.assertIsNotNone(server.mcp, "MCP server instance not initialized")
+
+    def test_build_startup_line_returns_expected_prefix(self):
+        """Tests that the startup line names the package."""
+        from ads_mcp import server
+
+        line = server._build_startup_line()
+        self.assertTrue(line.startswith("google-ads-mcp "))
+
+    @patch("ads_mcp.server.importlib.metadata.distribution")
+    @patch("ads_mcp.server.importlib.metadata.version")
+    def test_build_startup_line_degrades_to_unknown(
+        self, mock_version, mock_distribution
+    ):
+        """Tests that lookup failures degrade to "unknown" without raising."""
+        from ads_mcp import server
+
+        mock_version.side_effect = Exception("no version metadata")
+        mock_distribution.side_effect = Exception("no distribution metadata")
+
+        line = server._build_startup_line()
+
+        self.assertEqual(line, "google-ads-mcp unknown (commit unknown)")
