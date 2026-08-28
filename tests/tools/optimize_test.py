@@ -65,7 +65,7 @@ class TestRecommendationsList(OptimizeReadToolTestCase):
         self.service.search.return_value = []
         optimize.recommendations_list("1234567890", limit=50)
         query = self.service.search.call_args.kwargs["query"]
-        self.assertIn("ORDER BY recommendation.resource_name", query)
+        self.assertIn("ORDER BY recommendation.type", query)
         self.assertIn("LIMIT 51", query)
 
     def test_over_cap_rows_are_truncated_with_a_warning(self):

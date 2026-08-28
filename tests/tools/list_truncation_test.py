@@ -385,7 +385,7 @@ SPECS = (
         call=lambda cap: optimize.recommendations_list(CUSTOMER_ID, limit=cap),
         feed=_search_returns(optimize_test.make_recommendation_row),
         pages=lambda r: [r["items"]],
-        order_by=("ORDER BY recommendation.resource_name",),
+        order_by=("ORDER BY recommendation.type",),
     ),
     ListToolSpec(
         name="optimize_change_history",
