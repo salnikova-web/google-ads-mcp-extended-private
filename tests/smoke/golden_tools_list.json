@@ -2581,6 +2581,50 @@
         "destructiveHint": false,
         "readOnlyHint": false
       },
+      "description": "Changes the daily budget of SEVERAL campaigns in one request.\n\nUse this instead of calling mutate_campaign_budget_update in a loop\nwhenever three or more campaigns need a new budget: one call, one\npreview, one approval. For a single campaign use\nmutate_campaign_budget_update.\n\nupdates is a list of objects, at most 100:\n[{\"campaign_id\": \"123\", \"new_daily_budget\": 75.0}, ...]. Budgets are in\nthe account currency (75.0 = 75 EUR on a EUR account) and are converted\nto micros automatically. Duplicate campaign_ids are rejected.\n\nSHARED BUDGETS: the update happens on the budget, not on the campaign, so\na shared budget changes every campaign attached to it \u2014 each affected row\nin the preview carries a warning. Two campaigns on the same shared budget\ncollapse into one operation when they request the same amount, and are\nrejected when they request different amounts.\n\nDRY-RUN vs APPLY: with confirm=false (default) every campaign id is\nresolved first (unknown ids fail before anything is written) and the\nbatch is validated by Google Ads atomically (validate_only), so nothing\nis changed. With confirm=true the batch is applied with\npartial_failure=true, so some budgets can succeed while others fail \u2014 the\nresult reports requested/succeeded/failed counts plus a per-campaign\nbreakdown.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "confirm": {
+            "default": false,
+            "description": "False = dry-run preview (default), True = apply changes.",
+            "type": "boolean"
+          },
+          "customer_id": {
+            "description": "The client account id (digits only, no hyphens).",
+            "type": "string"
+          },
+          "updates": {
+            "description": "Up to 100 objects with \"campaign_id\" and a positive\n\"new_daily_budget\" in account currency.",
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "customer_id",
+          "updates"
+        ],
+        "type": "object"
+      },
+      "name": "mutate_campaign_budget_update_batch",
+      "outputSchema": {
+        "additionalProperties": true,
+        "type": "object"
+      }
+    },
+    {
+      "_meta": {
+        "fastmcp": {
+          "tags": []
+        }
+      },
+      "annotations": {
+        "destructiveHint": false,
+        "readOnlyHint": false
+      },
       "description": "Creates a new campaign together with a dedicated daily budget.\n\nOptional tracking_url_template / final_url_suffix set UTM tracking at\ncreation (recommended for web funnels). NOTE: the campaign is\ncreated with ACCOUNT-DEFAULT conversion goals \u2014 attach the product's\ncustom goal with campaign_set_custom_conversion_goal right after.\n\nSAFETY: by default runs in DRY-RUN mode (validate_only). Google Ads fully\nvalidates the request without creating anything. Re-run with confirm=true\nto actually create the campaign. New campaigns are created PAUSED unless\nstatus=\"ENABLED\" is passed explicitly.",
       "inputSchema": {
         "additionalProperties": false,
@@ -3113,6 +3157,54 @@
         "type": "object"
       },
       "name": "mutate_campaign_update_status",
+      "outputSchema": {
+        "additionalProperties": true,
+        "type": "object"
+      }
+    },
+    {
+      "_meta": {
+        "fastmcp": {
+          "tags": []
+        }
+      },
+      "annotations": {
+        "destructiveHint": false,
+        "readOnlyHint": false
+      },
+      "description": "Pauses or enables SEVERAL campaigns in one request.\n\nUse this instead of calling mutate_campaign_update_status in a loop\nwhenever three or more campaigns get the same new status: one call, one\npreview, one approval. For a single campaign \u2014 or for REMOVED \u2014 use\nmutate_campaign_update_status.\n\nOnly ENABLED and PAUSED are accepted here. Removing a campaign is\nirreversible, so it stays one campaign at a time on the single-campaign\ntool. At most 100 campaign ids per call; duplicates are dropped (kept in\nfirst-seen order) and reported in the preview.\n\nDRY-RUN vs APPLY: with confirm=false (default) the whole batch is\nvalidated by Google Ads atomically (validate_only), so one bad id fails\nthe entire preview and nothing is changed. With confirm=true the batch is\napplied with partial_failure=true, so some campaigns can succeed while\nothers fail \u2014 the result reports requested/succeeded/failed counts plus a\nper-campaign breakdown.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "campaign_ids": {
+            "description": "Numeric campaign ids, up to 100.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "confirm": {
+            "default": false,
+            "description": "False = dry-run preview (default), True = apply changes.",
+            "type": "boolean"
+          },
+          "customer_id": {
+            "description": "The client account id (digits only, no hyphens).",
+            "type": "string"
+          },
+          "status": {
+            "description": "ENABLED or PAUSED (applied to every listed campaign).",
+            "type": "string"
+          }
+        },
+        "required": [
+          "customer_id",
+          "campaign_ids",
+          "status"
+        ],
+        "type": "object"
+      },
+      "name": "mutate_campaign_update_status_batch",
       "outputSchema": {
         "additionalProperties": true,
         "type": "object"
