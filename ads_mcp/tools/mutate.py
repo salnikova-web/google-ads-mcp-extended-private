@@ -43,6 +43,16 @@ _MICROS = 1_000_000
 # (and the approval prompt in front of it) reviewable.
 _BATCH_MAX_ITEMS = 100
 
+# An operation counts as applied only when the API hands back a resource
+# name for it. partial_failure_error does not always pin a failure to an
+# operation index (an error without an `operations` field path cannot be
+# attributed, and a short results list has no entry to read), so "not in the
+# failure map" alone would report an unapplied operation as succeeded.
+_NO_RESULT_ERROR = (
+    "no result returned for this operation - it was NOT applied; verify the "
+    "current state with mutate_list_campaigns"
+)
+
 _WRITE_ANNOTATIONS = ToolAnnotations(readOnlyHint=False, destructiveHint=False)
 
 _ALLOWED_CHANNEL_TYPES = [
@@ -505,15 +515,16 @@ def campaign_update_status_batch(
                     {"campaign_id": campaign_id, "error": failures[index]}
                 )
                 continue
+            resource_name = (
+                results[index].resource_name if index < len(results) else ""
+            )
+            if not resource_name:
+                failed.append(
+                    {"campaign_id": campaign_id, "error": _NO_RESULT_ERROR}
+                )
+                continue
             succeeded.append(
-                {
-                    "campaign_id": campaign_id,
-                    "resource_name": (
-                        results[index].resource_name
-                        if index < len(results)
-                        else ""
-                    ),
-                }
+                {"campaign_id": campaign_id, "resource_name": resource_name}
             )
         details["succeeded"] = len(succeeded)
         details["failed"] = len(failed)
@@ -1162,6 +1173,16 @@ def campaign_budget_update_batch(
             resource_name = (
                 results[index].resource_name if index < len(results) else ""
             )
+            if not resource_name:
+                failed.extend(
+                    {
+                        "campaign_id": campaign_id,
+                        "budget_resource": budget_resource,
+                        "error": _NO_RESULT_ERROR,
+                    }
+                    for campaign_id in group["campaign_ids"]
+                )
+                continue
             succeeded.extend(
                 {
                     "campaign_id": campaign_id,

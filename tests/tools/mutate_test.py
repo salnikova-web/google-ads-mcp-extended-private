@@ -410,6 +410,53 @@ class TestCampaignUpdateStatusBatch(WriteToolTestCase):
             [{"campaign_id": "222", "error": "boom"}],
         )
 
+    def test_operation_without_a_result_counts_as_failed(self):
+        # partial_failure_error cannot always pin a failure to an operation
+        # index, and a short results list has no entry to read. Counting
+        # "not in the failure map" as success would report a campaign that
+        # was never touched as applied.
+        self.service.mutate_campaigns.return_value = SimpleNamespace(
+            partial_failure_error=None,
+            results=[
+                SimpleNamespace(
+                    resource_name="customers/1234567890/campaigns/111"
+                )
+            ],
+        )
+        result = mutate.campaign_update_status_batch(
+            "1234567890", ["111", "222"], "PAUSED", confirm=True
+        )
+        self.assertEqual(result["requested"], 2)
+        self.assertEqual(result["succeeded"], 1)
+        self.assertEqual(result["failed"], 1)
+        self.assertEqual(
+            [row["campaign_id"] for row in result["failed_campaigns"]], ["222"]
+        )
+        self.assertIn("NOT applied", result["failed_campaigns"][0]["error"])
+
+    def test_empty_resource_name_counts_as_failed(self):
+        self.service.mutate_campaigns.return_value = SimpleNamespace(
+            partial_failure_error=None,
+            results=[
+                SimpleNamespace(resource_name=""),
+                SimpleNamespace(
+                    resource_name="customers/1234567890/campaigns/222"
+                ),
+            ],
+        )
+        result = mutate.campaign_update_status_batch(
+            "1234567890", ["111", "222"], "PAUSED", confirm=True
+        )
+        self.assertEqual(result["succeeded"], 1)
+        self.assertEqual(result["failed"], 1)
+        self.assertEqual(
+            [row["campaign_id"] for row in result["succeeded_campaigns"]],
+            ["222"],
+        )
+        self.assertEqual(
+            [row["campaign_id"] for row in result["failed_campaigns"]], ["111"]
+        )
+
     def test_removed_is_refused_and_points_at_the_single_tool(self):
         with self.assertRaises(ToolError) as caught:
             mutate.campaign_update_status_batch(
@@ -611,6 +658,58 @@ class TestCampaignBudgetUpdateBatch(WriteToolTestCase):
                     "error": "too low",
                 }
             ],
+        )
+
+    def test_operation_without_a_result_counts_as_failed(self):
+        # Same guard as the status batch: an operation the API did not
+        # confirm must never inflate the succeeded count. On a shared budget
+        # the miss has to land on every campaign in the group.
+        self.service.search.return_value = self.SHARED_BUDGET
+        self.service.mutate_campaign_budgets.return_value = SimpleNamespace(
+            partial_failure_error=None,
+            results=[SimpleNamespace(resource_name="")],
+        )
+        result = mutate.campaign_budget_update_batch(
+            "1234567890",
+            [
+                {"campaign_id": "111", "new_daily_budget": 30.0},
+                {"campaign_id": "222", "new_daily_budget": 30.0},
+            ],
+            confirm=True,
+        )
+        self.assertEqual(result["requested"], 2)
+        self.assertEqual(result["budget_operations"], 1)
+        self.assertEqual(result["succeeded"], 0)
+        self.assertEqual(result["failed"], 2)
+        self.assertEqual(result["succeeded_campaigns"], [])
+        self.assertEqual(
+            [row["campaign_id"] for row in result["failed_campaigns"]],
+            ["111", "222"],
+        )
+        self.assertIn("NOT applied", result["failed_campaigns"][0]["error"])
+
+    def test_missing_result_entry_counts_as_failed(self):
+        self.service.search.return_value = self.OWN_BUDGETS
+        self.service.mutate_campaign_budgets.return_value = SimpleNamespace(
+            partial_failure_error=None,
+            results=[
+                SimpleNamespace(
+                    resource_name="customers/1234567890/campaignBudgets/1"
+                )
+            ],
+        )
+        result = mutate.campaign_budget_update_batch(
+            "1234567890",
+            [
+                {"campaign_id": "111", "new_daily_budget": 15.0},
+                {"campaign_id": "222", "new_daily_budget": 25.0},
+            ],
+            confirm=True,
+        )
+        self.assertEqual(result["succeeded"], 1)
+        self.assertEqual(result["failed"], 1)
+        self.assertEqual(
+            [row["campaign_id"] for row in result["failed_campaigns"]], ["222"]
         )
 
     def test_same_amount_on_a_shared_budget_collapses_to_one_operation(self):
