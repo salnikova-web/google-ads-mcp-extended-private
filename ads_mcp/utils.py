@@ -366,10 +366,11 @@ _GOOGLE_ADS_ERROR_HINTS = (
         # "Unrecognized field(s) in the query: 'campaign.start_date'[,
         # 'campaign.end_date']." - 8 occurrences.
         "'CAMPAIGN.START_DATE'",
-        "campaign.start_date / campaign.end_date are not selectable - "
-        "restrict the reporting window with segments.date conditions "
-        "instead, and confirm the campaign resource's real fields with "
-        "the metadata_get_resource_metadata tool",
+        "campaign.start_date / campaign.end_date are not selectable - as "
+        "a FILTER use segments.date conditions instead; as an ATTRIBUTE "
+        "(the campaign's own launch date) look the campaign resource's "
+        "real fields up with the metadata_get_resource_metadata tool - "
+        "do not derive a launch date from metrics",
     ),
     (
         # "Unrecognized fields in the query: 'auction_insight.domain',
@@ -399,15 +400,16 @@ _GOOGLE_ADS_ERROR_HINTS = (
     ),
     (
         "UNRECOGNIZED_FIELD",
-        "verify field names with the get_resource_metadata tool",
+        "verify field names with the metadata_get_resource_metadata tool",
     ),
     (
         "INVALID_FIELD",
-        "verify field names with the get_resource_metadata tool",
+        "verify field names with the metadata_get_resource_metadata tool",
     ),
     (
         "PROHIBITED_FIELD",
-        "check field compatibility with the get_resource_metadata tool",
+        "check field compatibility with the metadata_get_resource_metadata "
+        "tool",
     ),
     (
         "AUTHENTICATION",

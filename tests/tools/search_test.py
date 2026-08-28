@@ -336,6 +336,10 @@ class TestSearch(unittest.TestCase):
         # never fit, so the page simply looks complete.
         self.assertFalse(results["has_more"])
         self.assertIsNone(results["next_offset"])
+        # ...which is exactly why `total` may not be reported: the ceiling
+        # ended the page, not exhaustion, so 10000 would be a fabricated
+        # claim that the result set is this big.
+        self.assertIsNone(results["total"])
 
     @patch("ads_mcp.utils.get_googleads_service")
     @patch("ads_mcp.utils.format_output_row")
@@ -531,7 +535,14 @@ class TestSearch(unittest.TestCase):
             )
 
         message = str(context.exception)
-        self.assertIn("segments.date", message)
         self.assertIn("not selectable", message)
-        # The generic field hint still fires alongside the specific one.
+        # Both use cases, because 9 of the 10 logged failures SELECTED the
+        # field as the campaign's launch date rather than filtering on it:
+        # sending those to segments.date would invite a "launch date"
+        # invented from the first day with impressions.
+        self.assertIn("FILTER use segments.date", message)
+        self.assertIn("ATTRIBUTE", message)
+        # The generic field hint still fires alongside the specific one,
+        # and both must name the tool the same callable way.
         self.assertIn("verify field names", message)
+        self.assertNotIn("the get_resource_metadata tool", message)

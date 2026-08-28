@@ -138,8 +138,9 @@ def search(
         that set is exhausted (has_more is false); until then it is null.
         When has_more is true the envelope also carries `warning`, and
         repeating the call with offset=next_offset returns the next page.
-        A change_event query that hits the API's own 10000-row ceiling
-        additionally carries `api_row_cap_hit` and `note`.
+        A change_event query stopped by the API's own 10000-row ceiling
+        rather than by exhaustion also reports `total` null, and carries
+        `api_row_cap_hit` and `note`.
     """
 
     if offset < 0:
@@ -220,9 +221,10 @@ def search(
             len(page), limit == _DEFAULT_LIMIT
         )
     if row_cap_clamped and len(rows) == _CHANGE_EVENT_ROW_CAP:
-        # The probe row could not be appended, so has_more stays false and
-        # `total` reports the ceiling; say out loud that the ceiling, not
-        # the result set, is what ended the page.
+        # The probe row could not be appended, so has_more stays false --
+        # but the ceiling, not exhaustion, ended the page, so the set size
+        # is unknown and `total` must not claim the ceiling as the answer.
+        envelope["total"] = None
         envelope["api_row_cap_hit"] = True
         envelope["note"] = _CHANGE_EVENT_CAP_NOTE
     if response_format == "markdown":
