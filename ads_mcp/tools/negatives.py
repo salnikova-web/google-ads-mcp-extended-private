@@ -15,7 +15,8 @@ from pydantic import Field
 from google.ads.googleads.errors import GoogleAdsException
 
 import ads_mcp.utils as utils
-from ads_mcp.tools.mutate import (
+from ads_mcp.tools._write_common import (
+    _WRITE_ANNOTATIONS as _WRITE,
     _clean_customer_id,
     _preview_or_done,
     _raise_tool_error,
@@ -23,7 +24,6 @@ from ads_mcp.tools.mutate import (
 
 negatives_mcp = FastMCP("negatives")
 
-_WRITE = ToolAnnotations(readOnlyHint=False, destructiveHint=False)
 _READ = ToolAnnotations(readOnlyHint=True)
 
 # Schema-only alias shared by both match_type sites below: advertises the

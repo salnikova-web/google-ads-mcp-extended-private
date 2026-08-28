@@ -15,6 +15,8 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from fastmcp.exceptions import ToolError
+from google.api_core import protobuf_helpers
+from google.protobuf import duration_pb2
 
 import ads_mcp.utils as utils
 from ads_mcp.tools import demand_gen, experiments, mutate, optimize
@@ -98,6 +100,115 @@ class TestAdGroupUpdate(WriteToolTestCase):
                 with self.assertRaises(ToolError):
                     mutate.ad_group_update("1234567890", "111", new_name=blank)
         self.service.mutate_ad_groups.assert_not_called()
+
+
+class TestValueDerivedMasksAreExplicit(WriteToolTestCase):
+    """The three single-field updates that used to derive their update mask
+    from the object they had just filled in.
+
+    ``protobuf_helpers.field_mask(None, obj._pb)`` reads the message back
+    and keeps only the fields that differ from the proto default, so a
+    value of ``0`` / ``""`` / ``False`` never reaches the mask and the
+    update silently no-ops on exactly the change the caller asked for. It
+    also swept ``resource_name`` — the operation's key, not a field to
+    write — into every mask. Each tool now names its leaf paths outright,
+    and each is pinned below with a falsy value in place.
+    """
+
+    def test_a_value_derived_mask_really_drops_a_zero_leaf(self):
+        """Pins the third-party behaviour the explicit paths defend against.
+
+        Without this, the tests below only say "the paths are appended
+        unconditionally" and never show why that matters. A plain Duration
+        stands in for the Google Ads protos so the demonstration does not
+        pin an API version: ``seconds`` set to 0 is indistinguishable from
+        ``seconds`` never set, so the derived mask cannot carry it.
+        """
+        duration = duration_pb2.Duration()
+        duration.seconds = 0
+        duration.nanos = 5
+        self.assertEqual(
+            list(protobuf_helpers.field_mask(None, duration).paths), ["nanos"]
+        )
+        duration.seconds = 7
+        self.assertEqual(
+            list(protobuf_helpers.field_mask(None, duration).paths),
+            ["seconds", "nanos"],
+        )
+
+    def _falsy_enum_client(self):
+        """Makes every enum member lookup return 0, the proto default."""
+        self.client.enums.CampaignStatusEnum.__getitem__.return_value = 0
+        self.client.enums.AdGroupAdStatusEnum.__getitem__.return_value = 0
+
+    def test_campaign_update_status_sets_only_the_status_path(self):
+        mutate.campaign_update_status("1234567890", "222", "PAUSED")
+        _, operation = self.sent_operation(self.service.mutate_campaigns)
+        self.assertEqual(self.appended_mask_paths(operation), ["status"])
+        # resource_name identifies the campaign; it is not an update.
+        operation.update_mask.paths.extend.assert_not_called()
+        self.client.copy_from.assert_not_called()
+
+    def test_campaign_update_status_path_survives_a_falsy_status(self):
+        # A status whose enum value is the proto default (0) is exactly what
+        # the value-derived mask dropped, leaving an update that changed
+        # nothing while reporting success.
+        self._falsy_enum_client()
+        mutate.campaign_update_status("1234567890", "222", "ENABLED")
+        _, operation = self.sent_operation(self.service.mutate_campaigns)
+        self.assertEqual(operation.update.status, 0)
+        self.assertEqual(self.appended_mask_paths(operation), ["status"])
+
+    def test_campaign_update_status_removed_sends_no_mask(self):
+        mutate.campaign_update_status("1234567890", "222", "REMOVED")
+        _, operation = self.sent_operation(self.service.mutate_campaigns)
+        self.assertEqual(self.appended_mask_paths(operation), [])
+        self.assertEqual(operation.remove, "customers/1234567890/campaigns/222")
+
+    def test_ad_update_status_sets_only_the_status_path(self):
+        mutate.ad_update_status("1234567890", "111", "999", "PAUSED")
+        _, operation = self.sent_operation(self.service.mutate_ad_group_ads)
+        self.assertEqual(self.appended_mask_paths(operation), ["status"])
+        self.client.copy_from.assert_not_called()
+
+    def test_ad_update_status_path_survives_a_falsy_status(self):
+        self._falsy_enum_client()
+        mutate.ad_update_status("1234567890", "111", "999", "ENABLED")
+        _, operation = self.sent_operation(self.service.mutate_ad_group_ads)
+        self.assertEqual(operation.update.status, 0)
+        self.assertEqual(self.appended_mask_paths(operation), ["status"])
+
+    def test_campaign_budget_update_sets_only_the_amount_path(self):
+        self.service.search.return_value = [
+            make_budget_row(
+                111,
+                "Camp A",
+                "customers/1234567890/campaignBudgets/1",
+                10_000_000,
+            )
+        ]
+        mutate.campaign_budget_update("1234567890", "111", 15.0)
+        _, operation = self.sent_operation(self.service.mutate_campaign_budgets)
+        self.assertEqual(self.appended_mask_paths(operation), ["amount_micros"])
+        self.assertEqual(operation.update.amount_micros, 15_000_000)
+        self.client.copy_from.assert_not_called()
+
+    def test_campaign_budget_update_path_survives_a_zero_amount(self):
+        # new_daily_budget only has to be > 0, and a sub-micro amount rounds
+        # down to amount_micros=0 — the proto default the value-derived mask
+        # dropped, sending an operation with an empty mask.
+        self.service.search.return_value = [
+            make_budget_row(
+                111,
+                "Camp A",
+                "customers/1234567890/campaignBudgets/1",
+                10_000_000,
+            )
+        ]
+        mutate.campaign_budget_update("1234567890", "111", 0.0000001)
+        _, operation = self.sent_operation(self.service.mutate_campaign_budgets)
+        self.assertEqual(operation.update.amount_micros, 0)
+        self.assertEqual(self.appended_mask_paths(operation), ["amount_micros"])
 
 
 class TestCampaignSetTracking(WriteToolTestCase):

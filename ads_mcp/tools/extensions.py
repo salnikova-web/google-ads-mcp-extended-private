@@ -29,7 +29,8 @@ from mcp.types import ToolAnnotations
 from google.ads.googleads.errors import GoogleAdsException
 
 import ads_mcp.utils as utils
-from ads_mcp.tools.mutate import (
+from ads_mcp.tools._write_common import (
+    _WRITE_ANNOTATIONS as _WRITE,
     _clean_customer_id,
     _preview_or_done,
     _raise_tool_error,
@@ -37,7 +38,6 @@ from ads_mcp.tools.mutate import (
 
 extensions_mcp = FastMCP("extensions")
 
-_WRITE = ToolAnnotations(readOnlyHint=False, destructiveHint=False)
 _READ = ToolAnnotations(readOnlyHint=True)
 
 # Ground truth for every field_type this module can attach. attach_assets

@@ -27,7 +27,6 @@ tools elsewhere have no ``validate_only`` at all.
 """
 
 import math
-import time
 from typing import Annotated, Any, Dict, List, Optional
 
 from fastmcp import FastMCP
@@ -35,13 +34,24 @@ from fastmcp.exceptions import ToolError
 from mcp.types import ToolAnnotations
 from pydantic import Field
 from google.ads.googleads.errors import GoogleAdsException
-from google.api_core import protobuf_helpers
 
 import ads_mcp.utils as utils
 
-mutate_mcp = FastMCP("mutate")
+# Imported, and thereby re-exported: this module used to be the write
+# layer's shared library, so `from ads_mcp.tools.mutate import
+# _preview_or_done` (and friends) must keep working. The definitions now
+# live in _write_common.py.
+from ads_mcp.tools._write_common import (
+    _MICROS,
+    _WRITE_ANNOTATIONS,
+    _clean_customer_id,
+    _preview_or_done,
+    _raise_tool_error,
+    _to_micros,
+    build_campaign_with_budget,
+)
 
-_MICROS = 1_000_000
+mutate_mcp = FastMCP("mutate")
 
 # Batch tools send one request per call, so the cap keeps a single request
 # (and the approval prompt in front of it) reviewable.
@@ -56,8 +66,6 @@ _NO_RESULT_ERROR = (
     "no result returned for this operation - it was NOT applied; verify the "
     "current state with mutate_list_campaigns"
 )
-
-_WRITE_ANNOTATIONS = ToolAnnotations(readOnlyHint=False, destructiveHint=False)
 
 # The two conversion-goal tools mutate in two steps: the goal-config-level
 # switch is sent with validate_only, the per-category goal flips are not
@@ -108,73 +116,6 @@ _STATUS_ENUM = Annotated[
 _MATCH_TYPE_ENUM = Annotated[
     str, Field(json_schema_extra={"enum": ["EXACT", "PHRASE", "BROAD"]})
 ]
-
-
-# Kept under this name: 12 write modules import it from here.
-def _raise_tool_error(ex: GoogleAdsException) -> None:
-    utils.raise_tool_error(ex)
-
-
-def _to_micros(amount: float) -> int:
-    return int(round(float(amount) * _MICROS))
-
-
-def _clean_customer_id(customer_id: str) -> str:
-    """Normalises a customer id to digits, rejecting anything else.
-
-    Customer ids are spliced into resource names and query conditions, so a
-    value that is not purely numeric must never get through.
-    """
-    return utils.gaql_id(str(customer_id).replace("-", "").strip())
-
-
-def _preview_or_done(
-    confirm: bool,
-    action: str,
-    details: Dict[str, Any],
-    validated: bool = True,
-    note: Optional[str] = None,
-) -> Dict[str, Any]:
-    """Builds the applied/dry-run result envelope.
-
-    Args:
-        confirm: True when the operation was actually applied.
-        action: Tool-specific action name reported back to the caller.
-        details: Extra fields to merge into the result.
-        validated: Whether the dry-run really sent a validate_only request to
-            Google Ads. Pass False from tools that skip the API entirely when
-            confirm is false, so the preview does not claim a validation that
-            never happened. ``details`` is merged first, so this flag always
-            wins over a stray key of the same name.
-        note: Replaces the standard dry-run note. Only for tools whose
-            dry-run is neither "fully validated" nor "nothing sent" — a
-            multi-step tool that validates one step and previews the rest
-            locally, where both canned notes would be wrong. Ignored when
-            confirm is true.
-    """
-    if confirm:
-        return {**details, "applied": True, "action": action}
-    if note is None:
-        if validated:
-            note = (
-                "DRY-RUN: the operation was validated by Google Ads "
-                "(validate_only=true) but NOT applied. Re-run the tool with "
-                "confirm=true to apply it."
-            )
-        else:
-            note = (
-                "DRY-RUN: this preview was computed locally. Nothing was sent "
-                "to Google Ads, so nothing was validated and the operation "
-                "may still fail when applied. Re-run the tool with "
-                "confirm=true to apply it."
-            )
-    return {
-        **details,
-        "applied": False,
-        "validated": validated,
-        "action": action,
-        "note": note,
-    }
 
 
 def _check_batch_size(items: Any, param_name: str) -> None:
@@ -287,43 +228,21 @@ def campaign_create(
     client = utils.get_googleads_client()
     ga_service = utils.get_googleads_service("GoogleAdsService")
 
-    budget_temp_rn = f"customers/{customer_id}/campaignBudgets/-1"
-
-    # Operation 1: the campaign budget.
-    budget_mutate_op = client.get_type("MutateOperation")
-    budget = budget_mutate_op.campaign_budget_operation.create
-    budget.resource_name = budget_temp_rn
-    budget.name = f"{name} budget {int(time.time())}"
-    budget.amount_micros = _to_micros(daily_budget)
-    budget.delivery_method = client.enums.BudgetDeliveryMethodEnum.STANDARD
-    budget.explicitly_shared = False
-
-    # Operation 2: the campaign itself.
-    campaign_mutate_op = client.get_type("MutateOperation")
-    campaign = campaign_mutate_op.campaign_operation.create
-    campaign.name = name
-    if start_date:
-        campaign.start_date_time = (
-            start_date if " " in start_date else f"{start_date} 00:00:00"
-        )
-    if end_date:
-        campaign.end_date_time = (
-            end_date if " " in end_date else f"{end_date} 23:59:59"
-        )
-    campaign.campaign_budget = budget_temp_rn
-    campaign.contains_eu_political_advertising = (
-        client.enums.EuPoliticalAdvertisingStatusEnum.DOES_NOT_CONTAIN_EU_POLITICAL_ADVERTISING
+    # Operation 1 is the budget, operation 2 the campaign that references it
+    # by the budget's temporary resource name; the bidding block below and
+    # the SEARCH network settings finish the campaign.
+    budget_mutate_op, campaign_mutate_op, campaign = build_campaign_with_budget(
+        client,
+        customer_id,
+        name,
+        daily_budget,
+        channel_type,
+        status,
+        start_date=start_date,
+        end_date=end_date,
+        tracking_url_template=tracking_url_template,
+        final_url_suffix=final_url_suffix,
     )
-    if tracking_url_template:
-        if "{lpurl}" not in tracking_url_template:
-            raise ToolError("tracking_url_template must contain {lpurl}")
-        campaign.tracking_url_template = tracking_url_template
-    if final_url_suffix:
-        campaign.final_url_suffix = final_url_suffix
-    campaign.status = client.enums.CampaignStatusEnum[status]
-    campaign.advertising_channel_type = client.enums.AdvertisingChannelTypeEnum[
-        channel_type
-    ]
 
     if bidding_strategy == "MAXIMIZE_CONVERSIONS":
         if target_cpa is not None:
@@ -422,10 +341,13 @@ def campaign_update_status(
         campaign = operation.update
         campaign.resource_name = resource_name
         campaign.status = client.enums.CampaignStatusEnum[status]
-        client.copy_from(
-            operation.update_mask,
-            protobuf_helpers.field_mask(None, campaign._pb),
-        )
+        # Explicit leaf path, exactly the one field this tool writes. A
+        # value-derived mask (field_mask(None, campaign._pb)) reads the
+        # object back and keeps only what differs from the proto default,
+        # so a status whose enum value is the default would silently drop
+        # out and the update would no-op. It also swept resource_name into
+        # the mask, which is the operation's key, not a field to write.
+        operation.update_mask.paths.append("status")
 
     request = client.get_type("MutateCampaignsRequest")
     request.customer_id = customer_id
@@ -995,10 +917,12 @@ def campaign_budget_update(
     budget = operation.update
     budget.resource_name = budget_resource_name
     budget.amount_micros = _to_micros(new_daily_budget)
-    client.copy_from(
-        operation.update_mask,
-        protobuf_helpers.field_mask(None, budget._pb),
-    )
+    # Explicit leaf path, matching campaign_budget_update_batch. A
+    # value-derived mask drops a field left at the proto default, and
+    # amount_micros really can round down to 0 (new_daily_budget=0.0000001
+    # passes the "> 0" check above), which would send an operation whose
+    # mask is empty of the only field it means to change.
+    operation.update_mask.paths.append("amount_micros")
 
     request = client.get_type("MutateCampaignBudgetsRequest")
     request.customer_id = customer_id
@@ -1925,10 +1849,10 @@ def ad_update_status(
         ad_group_ad = operation.update
         ad_group_ad.resource_name = resource_name
         ad_group_ad.status = client.enums.AdGroupAdStatusEnum[status]
-        client.copy_from(
-            operation.update_mask,
-            protobuf_helpers.field_mask(None, ad_group_ad._pb),
-        )
+        # Explicit leaf path: status is the only field this tool writes, and
+        # a value-derived mask would drop it whenever its enum value is the
+        # proto default (and would add resource_name, the operation's key).
+        operation.update_mask.paths.append("status")
 
     request = client.get_type("MutateAdGroupAdsRequest")
     request.customer_id = customer_id

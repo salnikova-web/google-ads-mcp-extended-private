@@ -26,7 +26,6 @@ Safety model: identical to ads_mcp.tools.mutate — every write tool accepts
 ``confirm`` (default ``False`` = validate_only dry-run preview).
 """
 
-import time
 from typing import Annotated, Any, Dict, List, Optional
 
 from fastmcp import FastMCP
@@ -36,16 +35,18 @@ from pydantic import Field
 from google.ads.googleads.errors import GoogleAdsException
 
 import ads_mcp.utils as utils
-from ads_mcp.tools.mutate import (
+from ads_mcp.tools._write_common import (
+    _WRITE_ANNOTATIONS as _WRITE,
+    _check_len,
     _clean_customer_id,
     _preview_or_done,
     _raise_tool_error,
     _to_micros,
+    build_campaign_with_budget,
 )
 
 pmax_mcp = FastMCP("pmax")
 
-_WRITE = ToolAnnotations(readOnlyHint=False, destructiveHint=False)
 _READ = ToolAnnotations(readOnlyHint=True)
 
 # Schema-only aliases: advertise the accepted values in tools/list via
@@ -76,12 +77,6 @@ _MEDIA_FIELD_TYPES = (
 
 # Google raised the per-asset-group video cap from 5 to 15 (2025/26).
 _MAX_ASSET_GROUP_VIDEOS = 15
-
-
-def _check_len(items: List[str], max_len: int, label: str) -> None:
-    bad = [i for i in items if len(i) > max_len]
-    if bad:
-        raise ToolError(f"{label} over {max_len} chars: {bad}")
 
 
 def _link_asset_op(client, customer_id, asset_group_rn, asset_rn, field_type):
@@ -163,48 +158,27 @@ def campaign_create(
     client = utils.get_googleads_client()
     ga_service = utils.get_googleads_service("GoogleAdsService")
 
-    budget_temp_rn = f"customers/{customer_id}/campaignBudgets/-1"
-
-    budget_op = client.get_type("MutateOperation")
-    budget = budget_op.campaign_budget_operation.create
-    budget.resource_name = budget_temp_rn
-    budget.name = f"{name} budget {int(time.time())}"
-    budget.amount_micros = _to_micros(daily_budget)
-    budget.delivery_method = client.enums.BudgetDeliveryMethodEnum.STANDARD
-    budget.explicitly_shared = False
-
+    # The campaign gets a temporary resource name of its own: the
+    # business-name and logo assets are linked to it in the same request.
     campaign_temp_rn = f"customers/{customer_id}/campaigns/-2"
 
-    campaign_op = client.get_type("MutateOperation")
-    campaign = campaign_op.campaign_operation.create
-    campaign.resource_name = campaign_temp_rn
-    campaign.name = name
+    budget_op, campaign_op, campaign = build_campaign_with_budget(
+        client,
+        customer_id,
+        name,
+        daily_budget,
+        "PERFORMANCE_MAX",
+        status,
+        start_date=start_date,
+        end_date=end_date,
+        tracking_url_template=tracking_url_template,
+        final_url_suffix=final_url_suffix,
+        campaign_resource_name=campaign_temp_rn,
+    )
     if merchant_id:
         campaign.shopping_setting.merchant_id = int(merchant_id)
         if feed_label:
             campaign.shopping_setting.feed_label = feed_label
-    if start_date:
-        campaign.start_date_time = (
-            start_date if " " in start_date else f"{start_date} 00:00:00"
-        )
-    if end_date:
-        campaign.end_date_time = (
-            end_date if " " in end_date else f"{end_date} 23:59:59"
-        )
-    campaign.campaign_budget = budget_temp_rn
-    campaign.contains_eu_political_advertising = (
-        client.enums.EuPoliticalAdvertisingStatusEnum.DOES_NOT_CONTAIN_EU_POLITICAL_ADVERTISING
-    )
-    if tracking_url_template:
-        if "{lpurl}" not in tracking_url_template:
-            raise ToolError("tracking_url_template must contain {lpurl}")
-        campaign.tracking_url_template = tracking_url_template
-    if final_url_suffix:
-        campaign.final_url_suffix = final_url_suffix
-    campaign.status = client.enums.CampaignStatusEnum[status]
-    campaign.advertising_channel_type = (
-        client.enums.AdvertisingChannelTypeEnum.PERFORMANCE_MAX
-    )
 
     if bidding_strategy == "MAXIMIZE_CONVERSIONS":
         if target_cpa is not None:
