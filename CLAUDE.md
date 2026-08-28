@@ -1,7 +1,7 @@
 # google-ads-mcp-extended
 
 Python MCP-сервер `google-ads-mcp` (FastMCP) для Google Ads API:
-16 read-only + 82 write-інструменти в 16 неймспейсах. Write-документація —
+17 read-only + 84 write-інструменти (101) в 16 неймспейсах. Write-документація —
 [README-EXTENDED.md](README-EXTENDED.md).
 
 ## КРИТИЧНЕ: ланцюг доставки
@@ -73,10 +73,16 @@ python -m unittest tests.tools.mutate_test.КЛАС.тест   # один тес
 
 ## Write-безпека і правила правок
 
-- `_preview_or_done` в `ads_mcp/tools/mutate.py` — імпортується 12 write-
-  модулями. П'ять інструментів не мають віддаленої валідації в dry-run:
-  `optimize_recommendation_apply/dismiss` (запити БЕЗ поля `validate_only` —
-  не «лагодити»), `experiments_experiment_create/end/promote`.
+- `_preview_or_done` визначено в `ads_mcp/tools/_write_common.py`
+  (`mutate.py` ре-експортує для зворотної сумісності) — імпортується
+  12 іншими write-модулями + mutate.py, 13 разом. П'ять інструментів не
+  мають віддаленої валідації в dry-run: `optimize_recommendation_apply/
+  dismiss` (запити БЕЗ поля `validate_only` — не «лагодити»),
+  `experiments_experiment_create/end/promote`.
+- Назви параметрів у write-інструментах: update-інструменти приймають
+  `new_name` (`mutate_ad_group_update`, `pmax_asset_group_update`);
+  `mutate_campaign_rename` навмисно лишає параметр `name` — стабільність
+  схеми важливіша за однаковість найменувань.
 - `mutate_keywords_add`: dry-run атомарний, apply — `partial_failure=True`.
   Незводимі (API відкидає їх разом). Задокументовано, не чіпати.
 - `field_mask` губить `""`, `0`, `False` → paths будувати тільки всередині
@@ -85,8 +91,11 @@ python -m unittest tests.tools.mutate_test.КЛАС.тест   # один тес
   поля, які користувач не передавав.
 - `_WRITE_ANNOTATIONS` та спільні write-хелпери централізовано в
   `ads_mcp/tools/_write_common.py` (mutate.py ре-експортує) — правка
-  константи зачіпає ВСІ ~98 write-інструментів одразу; дубль-копії ловить
-  інваріант-тест у write_invariants_test.py.
+  константи напряму зачіпає 74 з 84 write-інструментів (решта 10 мають
+  власні inline `ToolAnnotations`, здебільшого `destructiveHint=True` для
+  незворотних дій — REMOVED-статуси, видалення keywords/criteria/asset,
+  experiment end тощо); дубль-копії ловить інваріант-тест у
+  write_invariants_test.py.
 - `search.py` — навмисний raw read-only passthrough GAQL, НЕ вразливість.
   Решта write-шляхів екранують через `gaql_str()`/`gaql_id()`.
 - Кеш клієнта: ніколи argless `lru_cache` (у hosted-режимі віддасть виклик
@@ -110,8 +119,10 @@ python -m unittest tests.tools.mutate_test.КЛАС.тест   # один тес
   contributors". `[build-system]` у pyproject відсутній навмисно.
 - Проєкт нейтральний: без згадок компаній/розробників, плейсхолдери
   `YOUR_ORG`/`example.com`, без AI-трейлерів у комітах.
-- Пуш ТІЛЬКИ `main`, ніколи `--all`/`--mirror` — локальна гілка
-  `backup/pre-neutralize` несе стару ідентичність авторів.
+- Пуш ТІЛЬКИ `main`, ніколи `--all`/`--mirror` — історичні локальні гілки
+  можуть нести стару ідентичність авторів (приклад `backup/pre-neutralize`
+  вже видалено, але патерн лишається): пушити тільки те, що явно
+  призначено для пушу.
 - Реліз: branch → PR → merge → tag `vX.Y.Z` → GitHub release → пін
   клієнтського конфігу на `@vX.Y.Z` (не floating main).
 - Кожен реліз-PR бампає version у pyproject.toml до тега vX.Y.Z
