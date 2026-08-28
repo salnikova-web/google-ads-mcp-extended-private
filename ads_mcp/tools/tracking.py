@@ -202,14 +202,17 @@ def list_tracking(
                 ),
             )
         )
-        camp_rows = ga_service.search(
-            customer_id=customer_id,
-            query=(
-                "SELECT campaign.id, campaign.name, "
-                "campaign.tracking_url_template, campaign.final_url_suffix "
-                "FROM campaign WHERE campaign.status != 'REMOVED' "
-                "ORDER BY campaign.name"
-            ),
+        camp_rows = list(
+            ga_service.search(
+                customer_id=customer_id,
+                query=(
+                    "SELECT campaign.id, campaign.name, "
+                    "campaign.tracking_url_template, "
+                    "campaign.final_url_suffix "
+                    "FROM campaign WHERE campaign.status != 'REMOVED' "
+                    "ORDER BY campaign.name"
+                ),
+            )
         )
     except GoogleAdsException as ex:
         _raise_tool_error(ex)

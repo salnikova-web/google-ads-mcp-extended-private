@@ -1073,20 +1073,23 @@ def ad_update_asset_optimization(
     # Resolve the ad_group_ad resource and its current automation settings.
     ag_ad_rn = None
     current: Dict[int, int] = {}
-    for row in ga_service.search(
-        customer_id=customer_id,
-        query=(
-            "SELECT ad_group_ad.resource_name, "
-            "ad_group_ad.ad_group_ad_asset_automation_settings "
-            "FROM ad_group_ad "
-            f"WHERE ad_group_ad.ad.id = {int(ad_id)}"
-        ),
-    ):
-        ag_ad_rn = row.ad_group_ad.resource_name
-        for s in row.ad_group_ad.ad_group_ad_asset_automation_settings:
-            current[int(s.asset_automation_type)] = int(
-                s.asset_automation_status
-            )
+    try:
+        for row in ga_service.search(
+            customer_id=customer_id,
+            query=(
+                "SELECT ad_group_ad.resource_name, "
+                "ad_group_ad.ad_group_ad_asset_automation_settings "
+                "FROM ad_group_ad "
+                f"WHERE ad_group_ad.ad.id = {int(ad_id)}"
+            ),
+        ):
+            ag_ad_rn = row.ad_group_ad.resource_name
+            for s in row.ad_group_ad.ad_group_ad_asset_automation_settings:
+                current[int(s.asset_automation_type)] = int(
+                    s.asset_automation_status
+                )
+    except GoogleAdsException as ex:
+        _raise_tool_error(ex)
     if ag_ad_rn is None:
         raise ToolError(f"Ad {ad_id} not found in {customer_id}")
 

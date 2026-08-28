@@ -724,19 +724,23 @@ def asset_group_add_media(
     # Enforce the per-asset-group video cap (15) counting assets already
     # linked, so a partial batch doesn't fail cryptically mid-way.
     if field_type == "YOUTUBE_VIDEO":
-        existing = sum(
-            1
-            for _ in ga_service.search(
-                customer_id=customer_id,
-                query=(
-                    "SELECT asset_group_asset.asset "
-                    "FROM asset_group_asset "
-                    f"WHERE asset_group_asset.asset_group = '{asset_group_rn}' "
-                    "AND asset_group_asset.field_type = 'YOUTUBE_VIDEO' "
-                    "AND asset_group_asset.status != 'REMOVED'"
-                ),
+        try:
+            existing = sum(
+                1
+                for _ in ga_service.search(
+                    customer_id=customer_id,
+                    query=(
+                        "SELECT asset_group_asset.asset "
+                        "FROM asset_group_asset "
+                        "WHERE asset_group_asset.asset_group = "
+                        f"'{asset_group_rn}' "
+                        "AND asset_group_asset.field_type = 'YOUTUBE_VIDEO' "
+                        "AND asset_group_asset.status != 'REMOVED'"
+                    ),
+                )
             )
-        )
+        except GoogleAdsException as ex:
+            _raise_tool_error(ex)
         if existing + len(asset_ids) > _MAX_ASSET_GROUP_VIDEOS:
             raise ToolError(
                 f"Asset group already has {existing} video(s); adding "

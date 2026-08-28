@@ -19,6 +19,7 @@ from fastmcp.exceptions import ToolError
 import ads_mcp.utils as utils
 from ads_mcp.tools import demand_gen, experiments, mutate, optimize
 from ads_mcp.tools import pmax, tracking
+from tests.tools.middleware_test import make_google_ads_exception
 
 
 class WriteToolTestCase(unittest.TestCase):
@@ -310,6 +311,61 @@ class TestNoApiDryRuns(WriteToolTestCase):
                 self.mock_get_googleads_client.assert_not_called()
                 self.mock_get_googleads_service.assert_not_called()
                 self.assertEqual(self.service.mock_calls, [])
+
+
+class TestGaqlReadErrorsAreTranslated(WriteToolTestCase):
+    """A GoogleAdsException from a GAQL read used to escape these tools as
+    a raw exception instead of the module's formatted ToolError, because
+    the search() call or its row iteration sat outside any try/except.
+
+    Each fake service yields one row before raising, so the exception
+    happens during iteration (page 2+) rather than on the search() call
+    itself — matching how gapic actually pages, and proving the fix wraps
+    the iteration, not just the call.
+    """
+
+    @staticmethod
+    def _raising_after_one_row(exception, row):
+        def fake_search(*args, **kwargs):
+            yield row
+            raise exception
+
+        return fake_search
+
+    def test_campaign_update_settings_search_error_is_translated(self):
+        exception = make_google_ads_exception()
+        row = SimpleNamespace(
+            campaign=SimpleNamespace(asset_automation_settings=[])
+        )
+        self.service.search.side_effect = self._raising_after_one_row(
+            exception, row
+        )
+        with self.assertRaises(ToolError) as caught:
+            mutate.campaign_update_settings(
+                "1234567890", "222", text_customization=True
+            )
+        self.assertIn("Request ID", str(caught.exception))
+
+    def test_campaign_rename_search_error_is_translated(self):
+        exception = make_google_ads_exception()
+        row = SimpleNamespace(campaign=SimpleNamespace(name="Old Name"))
+        self.service.search.side_effect = self._raising_after_one_row(
+            exception, row
+        )
+        with self.assertRaises(ToolError) as caught:
+            mutate.campaign_rename("1234567890", "222", "New Name")
+        self.assertIn("Request ID", str(caught.exception))
+
+    def test_pmax_asset_group_add_media_search_error_is_translated(self):
+        exception = make_google_ads_exception()
+        self.service.search.side_effect = self._raising_after_one_row(
+            exception, SimpleNamespace()
+        )
+        with self.assertRaises(ToolError) as caught:
+            pmax.asset_group_add_media(
+                "1234567890", "333", ["999"], "YOUTUBE_VIDEO"
+            )
+        self.assertIn("Request ID", str(caught.exception))
 
 
 if __name__ == "__main__":

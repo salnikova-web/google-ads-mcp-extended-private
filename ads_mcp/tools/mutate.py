@@ -518,13 +518,19 @@ def campaign_update_settings(
         )
     ):
         ga_service = utils.get_googleads_service("GoogleAdsService")
-        rows = ga_service.search(
-            customer_id=customer_id,
-            query=(
-                "SELECT campaign.asset_automation_settings FROM campaign "
-                f"WHERE campaign.id = {int(campaign_id)}"
-            ),
-        )
+        try:
+            rows = list(
+                ga_service.search(
+                    customer_id=customer_id,
+                    query=(
+                        "SELECT campaign.asset_automation_settings FROM "
+                        "campaign "
+                        f"WHERE campaign.id = {int(campaign_id)}"
+                    ),
+                )
+            )
+        except GoogleAdsException as ex:
+            _raise_tool_error(ex)
         current: Dict[int, int] = {}
         for row in rows:
             for s in row.campaign.asset_automation_settings:
@@ -612,14 +618,17 @@ def campaign_rename(
     ga_service = utils.get_googleads_service("GoogleAdsService")
 
     old_name = None
-    for row in ga_service.search(
-        customer_id=customer_id,
-        query=(
-            "SELECT campaign.name FROM campaign "
-            f"WHERE campaign.id = {int(campaign_id)}"
-        ),
-    ):
-        old_name = row.campaign.name
+    try:
+        for row in ga_service.search(
+            customer_id=customer_id,
+            query=(
+                "SELECT campaign.name FROM campaign "
+                f"WHERE campaign.id = {int(campaign_id)}"
+            ),
+        ):
+            old_name = row.campaign.name
+    except GoogleAdsException as ex:
+        _raise_tool_error(ex)
     if old_name is None:
         raise ToolError(f"Campaign {campaign_id} not found in {customer_id}")
 
