@@ -286,27 +286,26 @@ switching or editing profiles only needs a client restart, never a
 reinstall — unlike edits to the bundled `ads_mcp/tools_config.yaml`, which
 ships inside the installed package.
 
-Approximate `tools/list` weight per namespace, measured on v0.2.0 (the two
-batch tools and wave-2 schema work shift these slightly):
+Approximate `tools/list` weight per namespace, measured on v0.3.0:
 
 | Namespace | Tools | Approx. size |
 |---|---|---|
-| mutate | 17 | 23.3 KB |
-| demandgen | 13 | 21.3 KB |
-| pmax | 11 | 16.5 KB |
-| targeting | 12 | 13.5 KB |
-| optimize | 8 | 8.7 KB |
-| search | 1 | 7.3 KB |
-| shopping | 5 | 6.6 KB |
-| extensions | 6 | 6.3 KB |
-| audiences | 5 | 6.0 KB |
-| display | 3 | 5.6 KB |
-| negatives | 5 | 4.4 KB |
-| video | 3 | 4.3 KB |
-| experiments | 4 | 4.2 KB |
-| tracking | 3 | 3.5 KB |
-| metadata | 1 | 1.3 KB |
-| customers | 1 | 0.7 KB |
+| mutate | 19 | 31.0 KB |
+| demandgen | 13 | 20.5 KB |
+| pmax | 11 | 15.5 KB |
+| targeting | 12 | 16.5 KB |
+| optimize | 8 | 10.8 KB |
+| search | 1 | 5.2 KB |
+| shopping | 5 | 6.3 KB |
+| extensions | 6 | 8.2 KB |
+| audiences | 5 | 5.5 KB |
+| display | 3 | 5.3 KB |
+| negatives | 5 | 5.8 KB |
+| video | 3 | 4.2 KB |
+| experiments | 4 | 3.9 KB |
+| tracking | 3 | 3.2 KB |
+| metadata | 2 | 3.4 KB |
+| customers | 1 | 1.0 KB |
 
 [examples/tool_configs/](examples/tool_configs/) has three ready-made
 profiles built from this table (each with header comments on activation and
@@ -315,9 +314,9 @@ re-enable it):
 
 | Profile | Namespaces enabled | Approx. size | vs. full |
 |---|---|---|---|
-| `analytics-readonly.yaml` | customers, search, metadata | ≈9.3 KB | −93% |
-| `analytics-plus.yaml` | + optimize | ≈18.0 KB | −87% |
-| `ops-core.yaml` | customers, search, metadata, mutate, negatives, targeting, extensions, optimize | ≈65.5 KB | −51% |
+| `analytics-readonly.yaml` | customers, search, metadata | ≈9.6 KB | −93% |
+| `analytics-plus.yaml` | + optimize | ≈20.4 KB | −86% |
+| `ops-core.yaml` | customers, search, metadata, mutate, negatives, targeting, extensions, optimize | ≈81.9 KB | −44% |
 
 `analytics-plus` trades a small size increase for change-history and
 recommendations reads, which live in `optimize` — that namespace also
