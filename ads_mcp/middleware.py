@@ -74,6 +74,7 @@ _OAUTH_MARKERS = (
 _TRANSIENT_CODES = (
     grpc.StatusCode.UNAVAILABLE,
     grpc.StatusCode.DEADLINE_EXCEEDED,
+    grpc.StatusCode.INTERNAL,
 )
 
 # The google-api-core equivalents, mapped to the status code they carry.
@@ -154,33 +155,49 @@ def _code_name(code: Any) -> str:
     return str(getattr(code, "name", None) or code)
 
 
-def _translate(ex: BaseException) -> str | None:
-    """Returns the agent-facing message for ``ex``, or None to leave it alone.
+def _translate(ex: BaseException) -> tuple[str, str | None] | None:
+    """Returns (agent-facing message, log-only marker) for ``ex``, or None
+    to leave it alone.
+
+    The marker names which OAuth signal fired (a gRPC status-code name or
+    the matched substring) and is for the server-side log line only: never
+    the ``ToolError`` message the agent sees, and never the raw haystack it
+    was matched against (which can otherwise carry OAuth error internals).
+    It lets an operator tell which condition fired straight from the log
+    line without re-deriving it from the fixed message text. Every branch
+    that does not distinguish OAuth signals returns None for the marker.
 
     ``GoogleAdsException`` is deliberately excluded: it has its own formatter
     in ``utils.raise_tool_error`` (request id, per-error codes and field
     paths), which the caller delegates to instead.
     """
     if isinstance(ex, auth_exceptions.DefaultCredentialsError):
-        return _NO_CREDENTIALS_MESSAGE
+        return _NO_CREDENTIALS_MESSAGE, None
 
     if isinstance(ex, auth_exceptions.RefreshError):
-        return _OAUTH_MESSAGE
+        return _OAUTH_MESSAGE, type(ex).__name__
 
     if isinstance(ex, grpc.RpcError):
         code = _rpc_code(ex)
         haystack = _rpc_haystack(ex)
-        if code is grpc.StatusCode.UNAUTHENTICATED or any(
-            marker in haystack for marker in _OAUTH_MARKERS
-        ):
-            return _OAUTH_MESSAGE
+        if code is grpc.StatusCode.UNAUTHENTICATED:
+            return _OAUTH_MESSAGE, _code_name(code)
+        matched_marker = next(
+            (marker for marker in _OAUTH_MARKERS if marker in haystack),
+            None,
+        )
+        if matched_marker is not None:
+            return _OAUTH_MESSAGE, matched_marker
         if code in _TRANSIENT_CODES:
-            return _transport_message(_code_name(code), _short_detail(ex))
+            return (
+                _transport_message(_code_name(code), _short_detail(ex)),
+                None,
+            )
         return None
 
     for error_type, code_name in _TRANSIENT_API_CORE:
         if isinstance(ex, error_type):
-            return _transport_message(code_name, _short_detail(ex))
+            return _transport_message(code_name, _short_detail(ex)), None
 
     return None
 
@@ -217,9 +234,17 @@ class GoogleAdsErrorMiddleware(Middleware):
                 if isinstance(original, GoogleAdsException):
                     # Logs and raises with the request id and field paths.
                     utils.raise_tool_error(original)
-                message = _translate(original)
-                if message is not None:
-                    logger.warning("google-ads tool error:\n%s", message)
+                translated = _translate(original)
+                if translated is not None:
+                    message, log_marker = translated
+                    if log_marker is not None:
+                        logger.warning(
+                            "google-ads tool error [%s]:\n%s",
+                            log_marker,
+                            message,
+                        )
+                    else:
+                        logger.warning("google-ads tool error:\n%s", message)
                     raise ToolError(message) from ex
             # Not ours: a deliberate ToolError from a tool module, or a bug
             # that must keep its traceback.

@@ -200,16 +200,26 @@ class TestErrorMiddleware(unittest.IsolatedAsyncioTestCase):
             details="Getting metadata from plugin failed with error: "
             "('invalid_grant: Token has been expired or revoked.', {})",
         )
-        message = await self._message_for(error)
+        with self.assertLogs(
+            "ads_mcp.middleware", level=logging.WARNING
+        ) as logs:
+            message = await self._message_for(error)
         self.assertIn("NOT retryable", message)
         self.assertIn("Re-authenticate", message)
+        # The marker word is logged server-side, never in the agent message.
+        self.assertIn("invalid_grant", logs.output[0])
+        self.assertNotIn("invalid_grant", message)
 
     async def test_unauthenticated_rpc_error_is_not_retryable(self):
         error = FakeRpcError(
             grpc.StatusCode.UNAUTHENTICATED, details="Request had bad auth."
         )
-        message = await self._message_for(error)
+        with self.assertLogs(
+            "ads_mcp.middleware", level=logging.WARNING
+        ) as logs:
+            message = await self._message_for(error)
         self.assertIn("NOT retryable", message)
+        self.assertIn("UNAUTHENTICATED", logs.output[0])
 
     async def test_invalid_grant_only_in_debug_string_is_matched(self):
         error = FakeRpcError(
@@ -217,14 +227,22 @@ class TestErrorMiddleware(unittest.IsolatedAsyncioTestCase):
             details="Stream removed",
             debug_string="UNKNOWN:Error received ... invalid_grant ...",
         )
-        message = await self._message_for(error)
+        with self.assertLogs(
+            "ads_mcp.middleware", level=logging.WARNING
+        ) as logs:
+            message = await self._message_for(error)
         self.assertIn("NOT retryable", message)
+        self.assertIn("invalid_grant", logs.output[0])
 
     async def test_refresh_error_is_not_retryable(self):
-        message = await self._message_for(
-            auth_exceptions.RefreshError("invalid_grant")
-        )
+        with self.assertLogs(
+            "ads_mcp.middleware", level=logging.WARNING
+        ) as logs:
+            message = await self._message_for(
+                auth_exceptions.RefreshError("invalid_grant")
+            )
         self.assertIn("NOT retryable", message)
+        self.assertIn("RefreshError", logs.output[0])
 
     async def test_unavailable_is_transient_with_mutate_caution(self):
         error = FakeRpcError(
@@ -245,6 +263,12 @@ class TestErrorMiddleware(unittest.IsolatedAsyncioTestCase):
         )
         message = await self._message_for(error)
         self.assertIn("transport error (DEADLINE_EXCEEDED)", message)
+        self.assertIn("Transient", message)
+
+    async def test_internal_rpc_error_is_transient(self):
+        error = FakeRpcError(grpc.StatusCode.INTERNAL, details="internal error")
+        message = await self._message_for(error)
+        self.assertIn("transport error (INTERNAL)", message)
         self.assertIn("Transient", message)
 
     async def test_api_core_service_unavailable_is_transient(self):

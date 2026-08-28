@@ -14,6 +14,8 @@
 
 """Test cases for the server module."""
 
+import io
+import logging
 import unittest
 from unittest.mock import patch
 
@@ -52,3 +54,47 @@ class TestUtils(unittest.TestCase):
         line = server._build_startup_line()
 
         self.assertEqual(line, "google-ads-mcp unknown (commit unknown)")
+
+
+class TestConfigureStderrLogging(unittest.TestCase):
+    """Confirms ads_mcp warnings actually reach a real handler at runtime.
+
+    ``ads_mcp.utils`` and ``ads_mcp.middleware`` only ever attach a
+    ``NullHandler`` to their own loggers, by design (see the comments
+    there). ``run_server()`` is the host application, and
+    ``_configure_stderr_logging`` is the one place responsible for giving
+    those warnings somewhere real to go. This is deliberately not
+    ``assertLogs``: that intercepts at the logging-framework level and
+    would pass even if no real handler were ever attached, which is
+    exactly the bug this test guards against.
+    """
+
+    def setUp(self):
+        self.package_logger = logging.getLogger("ads_mcp")
+        self._original_handlers = list(self.package_logger.handlers)
+        self._original_level = self.package_logger.level
+        self.package_logger.handlers = []
+
+    def tearDown(self):
+        self.package_logger.handlers = self._original_handlers
+        self.package_logger.setLevel(self._original_level)
+
+    def test_warning_reaches_the_attached_handler(self):
+        from ads_mcp import server
+
+        stream = io.StringIO()
+        with patch("sys.stderr", stream):
+            server._configure_stderr_logging()
+            logging.getLogger("ads_mcp.anything").warning(
+                "something went wrong"
+            )
+
+        self.assertIn("something went wrong", stream.getvalue())
+
+    def test_repeated_calls_do_not_stack_handlers(self):
+        from ads_mcp import server
+
+        server._configure_stderr_logging()
+        server._configure_stderr_logging()
+
+        self.assertEqual(len(self.package_logger.handlers), 1)

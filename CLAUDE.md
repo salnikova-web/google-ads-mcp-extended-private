@@ -115,7 +115,9 @@ python -m unittest tests.tools.mutate_test.КЛАС.тест   # один тес
 - Кожен реліз-PR бампає version у pyproject.toml до тега vX.Y.Z
   (інстальована версія має збігатися з тегом).
 - Перед будь-якою зміною видимості репо/публічним форком: `git
-  ls-files CLAUDE.md .claude/` у published tree має бути порожнім.
+  ls-files CLAUDE.md .claude/` у published tree має бути порожнім; також
+  перевірити, що `noxfile.py` не містить машинно-специфічних шляхів (або
+  занейтралізувати `DEPLOY_SOURCE_REPO` через `GOOGLE_ADS_MCP_DEPLOY_REPO`).
 
 ## Відомі хвости (не «лагодити» мимохідь, окремі задачі)
 

@@ -31,8 +31,45 @@ from ads_mcp.resources import (
 
 import importlib.metadata
 import json
+import logging
 import os
 import sys
+
+
+def _configure_stderr_logging() -> None:
+    """Gives ads_mcp's own warnings a real destination in this process.
+
+    ads_mcp modules attach only a ``NullHandler`` to their loggers (see
+    ``utils.py``, ``middleware.py``) because configuring logging is the
+    host application's job, not a library's. This entrypoint IS that host,
+    so it is the one place allowed to attach a real handler.
+
+    Without this, a ``logger.warning`` call in ``ads_mcp.utils`` or
+    ``ads_mcp.middleware`` never reaches stderr: fastmcp configures only
+    its own "fastmcp" logger (with ``propagate=False``) and never touches
+    the root logger, and the ``NullHandler`` already on the "ads_mcp.*"
+    loggers counts as a handler having "found" the record, which silently
+    suppresses logging's own ``lastResort`` fallback even though nothing
+    ever actually printed the record anywhere.
+
+    Guarded against attaching twice (e.g. ``run_server`` invoked more than
+    once in the same process, such as under test).
+    """
+    package_logger = logging.getLogger("ads_mcp")
+    already_configured = any(
+        isinstance(existing, logging.StreamHandler)
+        for existing in package_logger.handlers
+    )
+    if already_configured:
+        return
+
+    handler = logging.StreamHandler(sys.stderr)
+    handler.setLevel(logging.WARNING)
+    handler.setFormatter(
+        logging.Formatter("%(name)s %(levelname)s: %(message)s")
+    )
+    package_logger.addHandler(handler)
+    package_logger.setLevel(logging.WARNING)
 
 
 def _build_startup_line() -> str:
@@ -66,6 +103,7 @@ def run_server() -> None:
 
     # stdout carries JSON-RPC under the stdio transport; never print here.
     print(_build_startup_line(), file=sys.stderr)
+    _configure_stderr_logging()
 
     if _CLIENT_ID and _CLIENT_SECRET:
         mcp.run(

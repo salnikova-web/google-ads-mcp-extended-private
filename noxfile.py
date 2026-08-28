@@ -28,11 +28,17 @@ PYTHON_VERSIONS = ["3.10", "3.11", "3.12", "3.13"]
 nox.options.error_on_missing_interpreters = True
 
 # The real clone that the live Claude Desktop server is installed from.
-# `nox -s deploy` always ships committed main from THIS path, even when the
-# session itself is invoked from a worktree (its format/test gates run
-# against the worktree's own .venv and tests, but the pipx install and the
-# commit verification below are always anchored here).
-DEPLOY_SOURCE_REPO = "/Users/user/Documents/Develop/google-ads-mcp-extended"
+# `nox -s deploy` must be invoked from THIS clone on branch main:
+# `_deploy_guard` checks the invoking checkout's OWN current branch, and a
+# worktree's current branch is its own worktree branch, never literally
+# "main", so running this session from a worktree fails the guard before
+# any format/test/install step runs (fail-safe, not a supported path). The
+# pipx install and the commit verification below are always anchored at
+# this path; override it for local testing via GOOGLE_ADS_MCP_DEPLOY_REPO.
+DEPLOY_SOURCE_REPO = os.environ.get(
+    "GOOGLE_ADS_MCP_DEPLOY_REPO",
+    "/Users/user/Documents/Develop/google-ads-mcp-extended",
+)
 DEPLOY_PACKAGE_SPEC = f"google-ads-mcp @ git+file://{DEPLOY_SOURCE_REPO}@main"
 
 REPO_ROOT = pathlib.Path(__file__).parent.resolve()
