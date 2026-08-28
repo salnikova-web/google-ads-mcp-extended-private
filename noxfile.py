@@ -16,6 +16,7 @@ import glob
 import json
 import os
 import pathlib
+import shutil
 import sys
 
 import nox
@@ -115,6 +116,37 @@ def lint(session):
 def format(session):
     """Runs the black formatter and applies formatting fixes."""
     _format(session)
+
+
+@nox.session(venv_backend="none")
+def clean(session):
+    """Removes stale build artifacts from the working tree.
+
+    Deletes build/, dist/, *.egg-info directories, and .coverage* files at
+    the repo root. All of these are gitignored but accumulate across local
+    `build`/`test` runs and pollute every grep of the tree. Never touches
+    .venv/, .nox/, or .superpowers/ -- this session only ever targets the
+    specific artifact names above. Safe to run repeatedly: a second run
+    with nothing left to remove just logs that and exits clean.
+    """
+    targets = []
+    for name in ("build", "dist"):
+        path = REPO_ROOT / name
+        if path.is_dir():
+            targets.append(path)
+    targets.extend(sorted(REPO_ROOT.glob("*.egg-info")))
+    targets.extend(sorted(REPO_ROOT.glob(".coverage*")))
+
+    if not targets:
+        session.log("Nothing to clean.")
+        return
+
+    for target in targets:
+        session.log(f"Removing {target}")
+        if target.is_dir():
+            shutil.rmtree(target)
+        else:
+            target.unlink()
 
 
 # `tests` runs once per entry in PYTHON_VERSIONS, and TEST_COMMAND uses
