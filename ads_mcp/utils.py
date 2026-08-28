@@ -16,12 +16,13 @@
 
 """Common utilities used by the MCP server."""
 
-from typing import Any
+from typing import Any, NoReturn
 import proto
 from google.protobuf.message import Message as PbMessage
 from google.protobuf.json_format import MessageToDict
 import logging
 from google.ads.googleads.client import GoogleAdsClient
+from google.ads.googleads.errors import GoogleAdsException
 
 from fastmcp.exceptions import ToolError
 from google.ads.googleads.util import get_nested_attr
@@ -36,7 +37,6 @@ import re
 import subprocess
 import threading
 import time
-from unittest.mock import patch
 
 # filename for generated field information used by search
 _GAQL_FILENAME = "gaql_resources.txt"
@@ -47,11 +47,13 @@ logger = logging.getLogger(__name__)
 # under the stdio transport anything written to stdout corrupts the JSON-RPC
 # stream. A NullHandler keeps library logging silent until a host configures it.
 logger.addHandler(logging.NullHandler())
-logging.getLogger("httpx").setLevel(logging.WARNING)
 
-# OAuth scope for the Google Ads API. Google Ads does not publish a separate
-# read-only scope; access is restricted to read methods by the tools this
-# server exposes (see ads_mcp/tools/).
+# The only OAuth scope Google Ads publishes, and it is full read/write: there
+# is no read-only variant to fall back on, and this server does use the write
+# half (84 write tools across 13 of the 16 namespaces). Nothing here limits
+# what a caller can change -- write safety comes from the dry-run-by-default
+# layer in the tools themselves (`confirm=False` previews, `validate_only`
+# requests), not from the credential.
 _ADS_SCOPE = "https://www.googleapis.com/auth/adwords"
 
 
@@ -92,6 +94,13 @@ def gaql_id(value: Any) -> str:
     return text
 
 
+# Serialises the window in which `subprocess.Popen` is swapped out below.
+# Reentrant so a nested use on one thread restores in the right order instead
+# of deadlocking; the enclosing context's wrapper becomes the inner one's
+# "original".
+_popen_patch_lock = threading.RLock()
+
+
 @contextlib.contextmanager
 def prevent_stdio_inheritance():
     """Prevents child processes from inheriting the parent's stdio handles.
@@ -99,16 +108,28 @@ def prevent_stdio_inheritance():
     Fixes a deadlock on Windows where `google.auth.default()` spawns `gcloud`
     via subprocess without redirecting stdin, causing it to inherit the
     ProactorEventLoop's overlapping I/O handles used by MCP's stdio transport.
+
+    The swap is process-global, so it is guarded by a lock: two threads
+    building credentials at once (FastMCP serves tool calls from a thread
+    pool) would otherwise interleave save and restore -- thread B saving the
+    wrapper as its "original" while A restores the real Popen -- and leave the
+    wrapper installed for the rest of the process's life. Holding the lock for
+    the whole body means the credential-construction critical section is
+    serialised and the swap is always undone.
     """
-    original_popen = subprocess.Popen
+    with _popen_patch_lock:
+        original_popen = subprocess.Popen
 
-    def safe_popen(*args, **kwargs):
-        if kwargs.get("stdin") is None:
-            kwargs["stdin"] = subprocess.DEVNULL
-        return original_popen(*args, **kwargs)
+        def safe_popen(*args, **kwargs):
+            if kwargs.get("stdin") is None:
+                kwargs["stdin"] = subprocess.DEVNULL
+            return original_popen(*args, **kwargs)
 
-    with patch("subprocess.Popen", new=safe_popen):
-        yield
+        subprocess.Popen = safe_popen
+        try:
+            yield
+        finally:
+            subprocess.Popen = original_popen
 
 
 def _create_credentials() -> google.auth.credentials.Credentials:
@@ -174,6 +195,19 @@ def _build_googleads_client() -> GoogleAdsClient:
 #   * Only clients and service stubs are cached. Values returned by
 #     ``get_type`` are fresh, mutable protos that tools fill in; sharing one
 #     across calls would let concurrent requests corrupt each other's payloads.
+#   * Eviction (TTL expiry, LRU overflow, replacement) NEVER closes the
+#     evicted service's gRPC transport. Nothing here can know whether another
+#     thread is mid-RPC on that channel -- FastMCP dispatches tool calls from
+#     a thread pool, and one parallel call is enough -- and closing it would
+#     cancel that call in flight. For a ``confirm=true`` mutate the caller
+#     would see a cancellation for a change that may well have landed, which
+#     is the worst possible answer to give. So an evicted channel is simply
+#     dropped: it stays alive as long as a live RPC holds a reference and is
+#     finalized by the garbage collector afterwards. That is a deliberate
+#     leak-to-GC, bounded by ``_CACHE_MAX_ENTRIES`` live entries plus whatever
+#     in-flight calls still hold. ``clear_googleads_cache`` is the one place
+#     that does close transports: it is a test/host-initiated teardown where
+#     the caller is asserting there is nothing in flight.
 
 _CACHE_MAX_ENTRIES = 64
 # Comfortably below the ~1h lifetime of a Google OAuth access token, so an
@@ -207,7 +241,11 @@ def _credential_identity() -> tuple:
 
 
 def _close_quietly(value: Any) -> None:
-    """Closes a cached service's transport, ignoring failures."""
+    """Closes a cached service's transport, ignoring failures.
+
+    Only ``clear_googleads_cache`` may call this -- see the eviction rule in
+    the section comment above.
+    """
     transport = getattr(value, "transport", None)
     close = getattr(transport, "close", None)
     if close is None:
@@ -226,25 +264,21 @@ def _cache_get(key: tuple) -> Any:
             return None
         created, value = entry
         if now - created > _CACHE_TTL_SECONDS:
+            # Dropped, not closed: a concurrent RPC may still be using it.
             del _cache[key]
-            expired = value
-        else:
-            _cache.move_to_end(key)
-            return value
-    _close_quietly(expired)
-    return None
+            return None
+        _cache.move_to_end(key)
+        return value
 
 
 def _cache_put(key: tuple, value: Any) -> None:
-    evicted = []
     with _cache_lock:
-        if key in _cache:
-            evicted.append(_cache.pop(key)[1])
+        # Replaced and LRU-overflowed entries are dropped, not closed: a
+        # concurrent RPC may still be using them.
+        _cache.pop(key, None)
         _cache[key] = (time.monotonic(), value)
         while len(_cache) > _CACHE_MAX_ENTRIES:
-            evicted.append(_cache.popitem(last=False)[1][1])
-    for value in evicted:
-        _close_quietly(value)
+            _cache.popitem(last=False)
 
 
 def clear_googleads_cache() -> None:
@@ -430,11 +464,17 @@ _GOOGLE_ADS_ERROR_HINTS = (
 )
 
 
-def raise_tool_error(ex) -> None:
+def raise_tool_error(ex: GoogleAdsException) -> NoReturn:
     """Raises a ToolError for a GoogleAdsException, shared by all modules.
 
     Per error: message + error code + offending field path; plus one
     deduplicated actionable hint line per matched failure class.
+
+    ``NoReturn`` is the point of the annotation: the ~150 call sites are
+    written as a bare ``raise_tool_error(ex)`` statement inside an ``except``
+    block, and a type checker must know the function never falls through --
+    otherwise every one of those handlers looks like it can continue and
+    return ``None`` from a tool.
     """
     error_msgs = []
     hints = []

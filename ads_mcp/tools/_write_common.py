@@ -27,7 +27,7 @@ keeps working for anything outside this package.
 """
 
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, NoReturn, Optional
 
 from fastmcp.exceptions import ToolError
 from mcp.types import ToolAnnotations
@@ -45,7 +45,7 @@ _MICROS = 1_000_000
 _WRITE_ANNOTATIONS = ToolAnnotations(readOnlyHint=False, destructiveHint=False)
 
 
-def _raise_tool_error(ex: GoogleAdsException) -> None:
+def _raise_tool_error(ex: GoogleAdsException) -> NoReturn:
     """Re-raises a Google Ads failure as a formatted ToolError.
 
     A bare-raise shim on purpose: ``utils.raise_tool_error`` raises inside

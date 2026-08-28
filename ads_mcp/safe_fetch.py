@@ -81,8 +81,8 @@ def _assert_public_address(raw_address: str, host: str) -> None:
         )
 
 
-def _resolve_public_address(host: str, port: int) -> tuple[str, int]:
-    """Resolves the host and returns one validated (address, family) pair.
+def _resolve_public_address(host: str, port: int) -> str:
+    """Resolves the host and returns one validated address to dial.
 
     Every address the name resolves to is validated, so a hostname that mixes
     public and internal records cannot be used to slip through.
@@ -95,11 +95,11 @@ def _resolve_public_address(host: str, port: int) -> tuple[str, int]:
     if not infos:
         raise ToolError(f"Could not resolve host '{host}'.")
 
-    for family, _, _, _, sockaddr in infos:
+    for _, _, _, _, sockaddr in infos:
         _assert_public_address(sockaddr[0], host)
 
-    family, _, _, _, sockaddr = infos[0]
-    return sockaddr[0], family
+    _, _, _, _, first_sockaddr = infos[0]
+    return first_sockaddr[0]
 
 
 class _PinnedHTTPSConnection(http.client.HTTPSConnection):
@@ -109,10 +109,9 @@ class _PinnedHTTPSConnection(http.client.HTTPSConnection):
     verification behave normally; only the address we connect to is pinned.
     """
 
-    def __init__(self, host, pinned_address, family, **kwargs):
+    def __init__(self, host, pinned_address, **kwargs):
         super().__init__(host, **kwargs)
         self._pinned_address = pinned_address
-        self._family = family
 
     def connect(self):
         self.sock = socket.create_connection(
@@ -137,7 +136,7 @@ def _fetch_https(url: str, max_bytes: int, timeout: int) -> bytes:
         raise ToolError(f"Image URL has no host: {url}")
 
     port = parsed.port or 443
-    address, family = _resolve_public_address(host, port)
+    address = _resolve_public_address(host, port)
 
     path = parsed.path or "/"
     if parsed.query:
@@ -146,13 +145,18 @@ def _fetch_https(url: str, max_bytes: int, timeout: int) -> bytes:
     connection = _PinnedHTTPSConnection(
         host,
         address,
-        family,
         port=port,
         timeout=timeout,
         context=ssl.create_default_context(),
     )
     try:
-        connection.request("GET", path, headers={"Host": parsed.netloc})
+        # No explicit Host header: http.client builds one from ``self.host``
+        # and ``self.port`` (bracketing IPv6, omitting the default port). The
+        # header used to be built from ``parsed.netloc``, which also carries
+        # any ``user:password@`` userinfo -- that would have leaked the
+        # credentials of a URL like https://u:p@host/img.png into the request
+        # (and into any log on the far side) for no benefit.
+        connection.request("GET", path)
         response = connection.getresponse()
 
         if 300 <= response.status < 400:

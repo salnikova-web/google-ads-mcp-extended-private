@@ -21,26 +21,34 @@ from importlib import metadata
 logger = logging.getLogger(__name__)
 
 
+def _get_package_version_with_fallback() -> str:
+    """Returns the version of the package.
+
+    Falls back to 'unknown' if the version can't be resolved (an editable
+    checkout that was never installed, say).
+
+    Module level on purpose: defined in the class body it was callable exactly
+    once -- while the body was still executing -- and then became an attribute
+    taking no arguments, so ``self._get_package_version_with_fallback()``
+    raised TypeError for anyone who tried to reuse it.
+    """
+    try:
+        return metadata.version("google-ads-mcp")
+    except Exception:
+        return "unknown"
+
+
+# Resolved once at import; the installed version cannot change under a running
+# process. Leading space: it is appended to an existing api-client header value.
+_MCP_EXTRA_HEADER = f" google-ads-mcp/{_get_package_version_with_fallback()}"
+
+
 class MCPHeaderInterceptor(
     grpc.UnaryUnaryClientInterceptor, grpc.UnaryStreamClientInterceptor
 ):
     """A custom metadata interceptor to add the 'google-ads-mcp' header."""
 
     _API_CLIENT_HEADER = "x-goog-api-client"
-
-    def _get_package_version_with_fallback():
-        """Returns the version of the package.
-
-        Falls back to 'unknown' if the version can't be resolved.
-        """
-        try:
-            return metadata.version("google-ads-mcp")
-        except Exception:
-            return "unknown"
-
-    _MCP_EXTRA_HEADER = (
-        f" google-ads-mcp/{_get_package_version_with_fallback()}"
-    )
 
     def _mcp_intercept(self, continuation, client_call_details, request):
         """Generic interceptor used for Unary-Unary and Unary-Stream requests.
@@ -55,13 +63,16 @@ class MCPHeaderInterceptor(
         Returns:
             A grpc.Call/grpc.Future instance representing a service response.
         """
+        # Named ``call_metadata``, not ``metadata``: this module imports the
+        # ``importlib.metadata`` module under that name, and a local of the
+        # same name shadows it for the whole function body.
         try:
             if client_call_details.metadata is None:
-                metadata = []
+                call_metadata = []
             else:
-                metadata = list(client_call_details.metadata)
+                call_metadata = list(client_call_details.metadata)
 
-            for i, metadatum in enumerate(metadata):
+            for i, metadatum in enumerate(call_metadata):
                 # Check if the user agent header key is in the current metadatum
                 if metadatum[0] == self._API_CLIENT_HEADER:
                     # Convert the tuple to a list so it can be modified.
@@ -70,16 +81,16 @@ class MCPHeaderInterceptor(
                     if "google-ads-mcp" not in val[1]:
                         # Append the protobuf version key value pair to the end of
                         # the string.
-                        val[1] += self._MCP_EXTRA_HEADER
+                        val[1] += _MCP_EXTRA_HEADER
                         # Convert the metadatum back to a tuple and
                         # Splice it back in its original position in
                         # order to preserve the order of the metadata list.
-                        metadata[i] = tuple(val)
+                        call_metadata[i] = tuple(val)
                         # Exit the loop since we already found the user agent.
                         break
 
             new_client_call_details = client_call_details._replace(
-                metadata=metadata
+                metadata=call_metadata
             )
             return continuation(new_client_call_details, request)
         except Exception:
