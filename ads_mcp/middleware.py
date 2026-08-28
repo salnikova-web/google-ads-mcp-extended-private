@@ -23,6 +23,14 @@ the cause chain rather than the exception it caught. A ``ToolError`` raised
 deliberately by a tool module has no ``__cause__`` and no translatable
 exception anywhere in its chain, so it passes through untouched and is
 never double-wrapped.
+
+That last sentence is a rule, not an observation: **no module outside this
+one may write** ``raise ToolError(msg) from <exception>``. Chaining a
+hand-written ToolError to a translatable cause makes this middleware
+discard that message, re-format a generic one from the cause, and log the
+failure twice. Raise it bare (the original is still reachable through
+``__context__``), or use ``from None``. The rule is enforced over the
+source by ``tests/tools/middleware_test.py``.
 """
 
 import logging

@@ -3,14 +3,18 @@
 
 """Tests for the error-translating middleware.
 
-Two levels are covered. The unit tests drive ``on_call_tool`` with a stub
+Three levels are covered. The unit tests drive ``on_call_tool`` with a stub
 ``call_next`` that raises one exception class at a time. The mounted test
 goes through a real parent server, which is the only way to prove the
 translation survives FastMCP wrapping the tool's exception in a
-``ToolError`` before any middleware runs.
+``ToolError`` before any middleware runs. Last, a source-level invariant
+enforces the rule the cause walk depends on (see
+``TestChainedToolErrorInvariant``).
 """
 
+import ast
 import logging
+import pathlib
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -23,6 +27,7 @@ from fastmcp.exceptions import ToolError
 from fastmcp.server.middleware import MiddlewareContext
 from google.ads.googleads.errors import GoogleAdsException
 
+import ads_mcp
 from ads_mcp import utils
 from ads_mcp.config import ToolsConfig
 from ads_mcp.coordinator import initialize_and_mount_tools
@@ -79,6 +84,66 @@ def make_context(name="search_search"):
         message=mt.CallToolRequestParams(name=name, arguments={}),
         method="tools/call",
     )
+
+
+# --- source-level invariant -------------------------------------------------
+#
+# See TestChainedToolErrorInvariant for what this enforces and why.
+
+# ads_mcp/middleware.py is the one place allowed to chain a ToolError to a
+# cause: that is the translated error it produces itself.
+_CHAINING_ALLOWED = {"middleware.py"}
+
+
+def _raised_name(node):
+    """Returns the exception name a ``raise`` statement raises, or None.
+
+    Handles ``raise ToolError(...)``, ``raise exceptions.ToolError(...)``
+    and a bare ``raise ToolError`` alike.
+    """
+    exc = node.exc
+    if isinstance(exc, ast.Call):
+        exc = exc.func
+    if isinstance(exc, ast.Attribute):
+        return exc.attr
+    if isinstance(exc, ast.Name):
+        return exc.id
+    return None
+
+
+def _chained_tool_error_raises(source, filename="<source>"):
+    """Returns [(filename, lineno)] for every `raise ToolError(...) from X`.
+
+    ``from None`` is not reported: it clears ``__cause__``, which is exactly
+    what keeps the error out of the middleware's cause walk.
+    """
+    found = []
+    for node in ast.walk(ast.parse(source, filename)):
+        if not isinstance(node, ast.Raise) or node.cause is None:
+            continue
+        if isinstance(node.cause, ast.Constant) and node.cause.value is None:
+            continue
+        if _raised_name(node) == "ToolError":
+            found.append((filename, node.lineno))
+    return found
+
+
+def _scan_ads_mcp_sources():
+    """Returns (violations, files_scanned) over the whole ads_mcp package."""
+    package_root = pathlib.Path(ads_mcp.__file__).parent
+    violations = []
+    scanned = 0
+    for path in sorted(package_root.rglob("*.py")):
+        if path.name in _CHAINING_ALLOWED:
+            continue
+        scanned += 1
+        violations.extend(
+            _chained_tool_error_raises(
+                path.read_text(encoding="utf-8"),
+                str(path.relative_to(package_root.parent)),
+            )
+        )
+    return violations, scanned
 
 
 class TestErrorMiddleware(unittest.IsolatedAsyncioTestCase):
@@ -351,6 +416,88 @@ class TestMiddlewareOnMountedServer(unittest.IsolatedAsyncioTestCase):
             if isinstance(mw, GoogleAdsErrorMiddleware)
         ]
         self.assertEqual(len(translators), 1)
+
+
+class TestChainedToolErrorInvariant(unittest.TestCase):
+    """No module may chain a hand-written ToolError to its cause.
+
+    ``GoogleAdsErrorMiddleware`` translates by walking ``__cause__``. That
+    is safe only because a hand-formatted ToolError has no ``__cause__``:
+    ``utils.raise_tool_error`` raises inside an ``except`` block, so the
+    original lands in ``__context__``, which the walk ignores. The moment a
+    module writes ``raise ToolError(msg) from ex`` with a translatable
+    ``ex``, the middleware finds that cause, discards the module's message
+    in favour of a generic one and logs the failure twice.
+
+    Nothing in the type system stops that, so it is enforced here over the
+    source, in the reflection style of write_invariants_test.py.
+    """
+
+    FAILURE_HINT = (
+        "raise ToolError(msg) from <exception> is forbidden outside "
+        "ads_mcp/middleware.py: GoogleAdsErrorMiddleware walks __cause__, "
+        "so it would discard this hand-written message, re-format a "
+        "generic one from the cause, and log the failure twice. Use a "
+        "bare `raise ToolError(msg)` (the original stays in __context__), "
+        "or `from None` if the context must be suppressed too."
+    )
+
+    def test_no_tool_error_is_chained_to_a_cause(self):
+        violations, scanned = _scan_ads_mcp_sources()
+        # Guards against the scan silently covering nothing, which would
+        # make the assertion below vacuous.
+        self.assertGreaterEqual(scanned, 15)
+        self.assertEqual(
+            violations,
+            [],
+            "\n".join(
+                [f"{name}:{lineno}" for name, lineno in violations]
+                + [self.FAILURE_HINT]
+            ),
+        )
+
+    def test_detector_finds_the_forbidden_pattern(self):
+        """The scan above only means something if it can actually fail."""
+        source = (
+            "from fastmcp.exceptions import ToolError\n"
+            "def f(ex):\n"
+            "    try:\n"
+            "        pass\n"
+            "    except Exception as ex:\n"
+            "        raise ToolError('nice message') from ex\n"
+        )
+        self.assertEqual(
+            _chained_tool_error_raises(source, "fake.py"), [("fake.py", 6)]
+        )
+
+    def test_detector_finds_the_qualified_spelling(self):
+        source = (
+            "import fastmcp.exceptions as exceptions\n"
+            "def f(ex):\n"
+            "    raise exceptions.ToolError('boom') from ex\n"
+        )
+        self.assertEqual(
+            _chained_tool_error_raises(source, "fake.py"), [("fake.py", 3)]
+        )
+
+    def test_detector_allows_the_safe_spellings(self):
+        source = (
+            "from fastmcp.exceptions import ToolError\n"
+            "def f(ex):\n"
+            "    raise ToolError('bare, context only')\n"
+            "def g(ex):\n"
+            "    raise ToolError('suppressed') from None\n"
+            "def h(ex):\n"
+            "    raise ValueError('not a ToolError') from ex\n"
+        )
+        self.assertEqual(_chained_tool_error_raises(source, "fake.py"), [])
+
+    def test_middleware_module_is_the_only_exemption(self):
+        # The exemption list is a hole in the invariant; keep it to the one
+        # file that legitimately chains, and make sure it still exists.
+        self.assertEqual(_CHAINING_ALLOWED, {"middleware.py"})
+        package_root = pathlib.Path(ads_mcp.__file__).parent
+        self.assertTrue((package_root / "middleware.py").is_file())
 
 
 if __name__ == "__main__":
