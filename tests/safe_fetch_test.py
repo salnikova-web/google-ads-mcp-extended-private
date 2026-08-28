@@ -41,6 +41,10 @@ NON_PUBLIC_ADDRESSES = (
     ("172.16.5.4", "private RFC1918"),
     ("192.168.1.1", "private RFC1918"),
     ("169.254.169.254", "link-local: the cloud metadata endpoint"),
+    # Not caught by any of the six specific properties -- only by
+    # is_global. AWS and GCP hand this range out for pod and VPC
+    # networking, so on a hosted deployment it is internal reach.
+    ("100.64.0.1", "carrier-grade NAT shared address space"),
     ("0.0.0.0", "unspecified"),
     ("224.0.0.1", "multicast"),
     ("240.0.0.1", "reserved"),
@@ -50,6 +54,17 @@ NON_PUBLIC_ADDRESSES = (
     ("fd00::1", "IPv6 unique-local"),
     ("fe80::1", "IPv6 link-local"),
     ("ff02::1", "IPv6 multicast"),
+)
+
+# Whether this interpreter classifies an IPv4-mapped address at all, on
+# any of the properties the guard reads. It does not below CPython
+# 3.9.20/3.10.15/3.11.10/3.12.5, and the test skips there rather than
+# claiming a guarantee the runtime does not give.
+_MAPPED_LOOPBACK = ipaddress.ip_address("::ffff:127.0.0.1")
+MAPPED_LOOPBACK_IS_CLASSIFIED = (
+    not _MAPPED_LOOPBACK.is_global
+    or _MAPPED_LOOPBACK.is_private
+    or _MAPPED_LOOPBACK.is_loopback
 )
 
 
@@ -193,6 +208,9 @@ class TestAddressPinning(HttpsFetchTestCase):
     def test_non_public_addresses_are_refused(self):
         for address, why in NON_PUBLIC_ADDRESSES:
             with self.subTest(address=address, rejected_as=why):
+                # Without the reset, one address slipping through would
+                # also fail every later subTest on the leftover call.
+                self.mock_create_connection.reset_mock()
                 self.addresses = [address]
                 with self.assertRaises(ToolError) as caught:
                     self.fetch()
@@ -215,11 +233,10 @@ class TestAddressPinning(HttpsFetchTestCase):
         self.assertEqual(self.dialed_address(), (PUBLIC_V6, 443))
 
     @unittest.skipUnless(
-        ipaddress.ip_address("::ffff:127.0.0.1").is_loopback
-        or ipaddress.ip_address("::ffff:127.0.0.1").is_private,
+        MAPPED_LOOPBACK_IS_CLASSIFIED,
         "IPv4-mapped classification lands only in CPython 3.9.20/3.10.15/"
-        "3.11.10/3.12.5 and later; on an older patch release the guard "
-        f"lets it through (running {sys.version.split()[0]})",
+        "3.11.10/3.12.5 and later; on an older patch release no property "
+        f"the guard reads flags it (running {sys.version.split()[0]})",
     )
     def test_ipv4_mapped_loopback_is_refused(self):
         self.addresses = ["::ffff:127.0.0.1"]

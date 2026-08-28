@@ -65,10 +65,20 @@ def local_files_allowed() -> bool:
 
 
 def _assert_public_address(raw_address: str, host: str) -> None:
-    """Raises ToolError unless the address is a routable public one."""
+    """Raises ToolError unless the address is a routable public one.
+
+    ``is_global`` leads and carries the class: the six properties below it
+    all read False for 100.64.0.0/10 (carrier-grade NAT, which AWS and GCP
+    hand out for pod and VPC networking), so a hosted deployment could be
+    steered into its own internal network through that range alone. Asking
+    "is this globally routable" instead of naming ranges also survives the
+    interpreter reclassifying one -- the specific properties stay as the
+    message's evidence and as a second opinion.
+    """
     address = ipaddress.ip_address(raw_address)
     if (
-        address.is_private
+        not address.is_global
+        or address.is_private
         or address.is_loopback
         or address.is_link_local
         or address.is_reserved
