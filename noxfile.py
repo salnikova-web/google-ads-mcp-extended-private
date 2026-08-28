@@ -22,6 +22,11 @@ import nox
 
 PYTHON_VERSIONS = ["3.10", "3.11", "3.12", "3.13"]
 
+# Honesty over green: a missing interpreter must fail the session instead of
+# being skipped. Without this, `nox -s tests` on a machine that has none of
+# PYTHON_VERSIONS installed reports success having run zero tests.
+nox.options.error_on_missing_interpreters = True
+
 # The real clone that the live Claude Desktop server is installed from.
 # `nox -s deploy` always ships committed main from THIS path, even when the
 # session itself is invoked from a worktree (its format/test gates run

@@ -22,8 +22,14 @@ from fastmcp.exceptions import ToolError
 
 import ads_mcp.tools as tools_pkg
 import ads_mcp.utils as utils
-from ads_mcp.tools import demand_gen, mutate, pmax, tracking
+from ads_mcp.tools import audiences, demand_gen, display, extensions
+from ads_mcp.tools import mutate, negatives, optimize, pmax
+from ads_mcp.tools import shopping, targeting, tracking, video
 from ads_mcp.tools.mutate import _preview_or_done
+
+# Imported as a module, not `from ... import TestNoApiDryRuns`: a TestCase
+# bound into this namespace would be collected and run a second time.
+from tests.tools import mutate_test
 
 
 def _collect_tools():
@@ -89,12 +95,37 @@ class TestWriteToolInvariants(unittest.TestCase):
                     f"{module_name}.{tool.name} must default to dry-run",
                 )
 
+    def test_confirm_and_read_only_hint_agree(self):
+        # Biconditional: a `confirm` parameter and readOnlyHint=False are
+        # two spellings of "this tool writes". If they ever disagree, one
+        # of two silent failures has happened — a write tool annotated
+        # read-only escapes every check in this file, or a read-only tool
+        # grew a confirm parameter that gates nothing.
+        for module_name, tool in _collect_tools():
+            with self.subTest(module=module_name, tool=tool.name):
+                self.assertIsNotNone(tool.annotations)
+                has_confirm = "confirm" in inspect.signature(tool.fn).parameters
+                is_write = tool.annotations.readOnlyHint is False
+                self.assertEqual(
+                    has_confirm,
+                    is_write,
+                    f"{module_name}.{tool.name}: confirm parameter "
+                    f"present={has_confirm} but readOnlyHint is "
+                    f"{tool.annotations.readOnlyHint!r}; every write tool "
+                    "needs both, every read-only tool neither",
+                )
+
 
 class TestValidateOnlySamples(unittest.TestCase):
     """A representative sample of write tools sends validate_only=True on
     dry-run and validate_only=False on confirm=True."""
 
     # (function, args, kwargs) — enough arguments to reach the API call.
+    # Every write module must appear here (or, when the API offers no
+    # validate_only, in mutate_test.TestNoApiDryRuns.CALLS); that coverage
+    # is enforced by TestBehavioralSampleCoverage below. Tools are chosen
+    # for a straight path to the mutate call — none of them runs a
+    # pre-write GAQL lookup, so no fake result rows are needed.
     SAMPLES = [
         (mutate.campaign_create, ("1234567890", "Camp", 10.0), {}),
         (mutate.ad_group_update, ("1234567890", "111"), {"new_name": "New"}),
@@ -115,6 +146,34 @@ class TestValidateOnlySamples(unittest.TestCase):
             {"target_cpa": 5.0},
         ),
         (pmax.asset_group_update, ("1234567890", "333"), {"new_name": "New"}),
+        (
+            audiences.create,
+            ("1234567890", "Persona"),
+            {"genders": ["FEMALE"]},
+        ),
+        (display.ad_group_create, ("1234567890", "222", "Display AG"), {}),
+        (
+            extensions.add_callouts,
+            ("1234567890", "222", ["Free trial"]),
+            {},
+        ),
+        (
+            negatives.add_campaign_keywords,
+            ("1234567890", "222", ["neg kw"]),
+            {},
+        ),
+        # optimize_recommendation_apply/dismiss have no validate_only in
+        # the API (their dry-run sends nothing at all and is covered by
+        # mutate_test.TestNoApiDryRuns); label_create is the module's
+        # validate_only-capable representative.
+        (optimize.label_create, ("1234567890", "Automation"), {}),
+        (shopping.ad_group_create, ("1234567890", "222", "Shopping AG"), {}),
+        (
+            targeting.set_content_exclusions,
+            ("1234567890", "222", ["TRAGEDY"]),
+            {},
+        ),
+        (video.ad_group_create, ("1234567890", "222", "Video AG"), {}),
     ]
 
     def setUp(self):
@@ -169,6 +228,66 @@ class TestValidateOnlySamples(unittest.TestCase):
                 for request in requests:
                     self.assertIs(request.validate_only, False)
                 self.assertIs(result["applied"], True)
+
+
+class TestBehavioralSampleCoverage(unittest.TestCase):
+    """Reflection alone only proves a write tool *has* a confirm flag.
+
+    This meta-assertion makes sure the flag is also exercised: every write
+    module needs at least one tool that is actually called on a mocked
+    client and observed to be a dry-run. Without it a whole new write
+    module could land carrying nothing but the signature checks.
+    """
+
+    @staticmethod
+    def _sampled_modules():
+        """Module names covered by a behavioral dry-run sample.
+
+        Two lists count: the validate_only samples in this file, and the
+        no-API dry-runs in mutate_test (tools whose API has no
+        validate_only field, so their dry-run must send nothing at all).
+        """
+        entries = list(TestValidateOnlySamples.SAMPLES) + list(
+            mutate_test.TestNoApiDryRuns.CALLS
+        )
+        return {fn.__module__.rsplit(".", 1)[-1] for fn, _, _ in entries}
+
+    def test_every_write_module_has_a_behavioral_sample(self):
+        write_modules = sorted({module for module, _ in _write_tools()})
+        # Guards against the reflection silently returning nothing, which
+        # would make the loop below vacuously pass.
+        self.assertGreaterEqual(len(write_modules), 13)
+
+        sampled = self._sampled_modules()
+        for module_name in write_modules:
+            with self.subTest(module=module_name):
+                self.assertIn(
+                    module_name,
+                    sampled,
+                    f"write module ads_mcp.tools.{module_name} has no "
+                    "behavioral validate_only sample: add one of its "
+                    "tools to TestValidateOnlySamples.SAMPLES so a dry-run "
+                    "is proven to send validate_only=True. Only if that "
+                    "module's API has no validate_only field, add it to "
+                    "tests.tools.mutate_test.TestNoApiDryRuns.CALLS "
+                    "instead, where the dry-run is proven to send nothing.",
+                )
+
+    def test_samples_reference_real_write_tools(self):
+        # A sample pointing at a helper or a read-only function would
+        # satisfy the coverage check above without testing any write path.
+        write_functions = {tool.fn for _, tool in _write_tools()}
+        entries = list(TestValidateOnlySamples.SAMPLES) + list(
+            mutate_test.TestNoApiDryRuns.CALLS
+        )
+        for fn, _, _ in entries:
+            with self.subTest(tool=f"{fn.__module__}.{fn.__name__}"):
+                self.assertIn(
+                    fn,
+                    write_functions,
+                    f"{fn.__module__}.{fn.__name__} is sampled as a write "
+                    "tool but is not mounted as one",
+                )
 
 
 class TestGaqlHelpers(unittest.TestCase):
