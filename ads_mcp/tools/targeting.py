@@ -502,6 +502,16 @@ _AGE_RANGES = {
 }
 _GENDERS = ("MALE", "FEMALE", "UNDETERMINED")
 _DEVICES = ("MOBILE", "TABLET", "DESKTOP", "CONNECTED_TV")
+_TARGETING_DIMENSIONS = (
+    "KEYWORD",
+    "AUDIENCE",
+    "TOPIC",
+    "GENDER",
+    "AGE_RANGE",
+    "PLACEMENT",
+    "PARENTAL_STATUS",
+    "INCOME_RANGE",
+)
 
 
 @targeting_mcp.tool(annotations=_WRITE)
@@ -932,8 +942,14 @@ def set_ad_group_target_restrictions(
     ad_group.resource_name = f"customers/{customer_id}/adGroups/{ad_group_id}"
 
     def _restriction(dim: str, bid_only: bool):
+        key = str(dim).upper()
+        if key not in _TARGETING_DIMENSIONS:
+            raise ToolError(
+                f"Unknown targeting dimension '{dim}'; valid: "
+                f"{_TARGETING_DIMENSIONS}"
+            )
         r = client.get_type("TargetRestriction")
-        r.targeting_dimension = client.enums.TargetingDimensionEnum[dim.upper()]
+        r.targeting_dimension = client.enums.TargetingDimensionEnum[key]
         r.bid_only = bid_only
         return r
 

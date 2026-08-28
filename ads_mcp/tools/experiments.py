@@ -82,7 +82,7 @@ def experiment_create(
     }
     if not confirm:
         return _preview_or_done(
-            False, "experiments_create", preview, validated=False
+            False, "experiments_experiment_create", preview, validated=False
         )
 
     client = utils.get_googleads_client()
@@ -145,7 +145,7 @@ def experiment_create(
         "few minutes). Use experiments_experiments_list to see it, then "
         "edit the treatment campaign with the regular tools."
     )
-    return _preview_or_done(True, "experiments_create", preview)
+    return _preview_or_done(True, "experiments_experiment_create", preview)
 
 
 @experiments_mcp.tool(annotations=_READ)
@@ -257,7 +257,7 @@ def experiment_end(
     }
     if not confirm:
         return _preview_or_done(
-            False, "experiments_end", details, validated=False
+            False, "experiments_experiment_end", details, validated=False
         )
 
     client = utils.get_googleads_client()
@@ -268,7 +268,7 @@ def experiment_end(
         exp_service.end_experiment(request=request)
     except GoogleAdsException as ex:
         _raise_tool_error(ex)
-    return _preview_or_done(True, "experiments_end", details)
+    return _preview_or_done(True, "experiments_experiment_end", details)
 
 
 @experiments_mcp.tool(
@@ -297,7 +297,7 @@ def experiment_promote(
     }
     if not confirm:
         return _preview_or_done(
-            False, "experiments_promote", details, validated=False
+            False, "experiments_experiment_promote", details, validated=False
         )
 
     client = utils.get_googleads_client()
@@ -311,4 +311,4 @@ def experiment_promote(
     except GoogleAdsException as ex:
         _raise_tool_error(ex)
     details["note"] = "Promotion started (async). Check status in the UI."
-    return _preview_or_done(True, "experiments_promote", details)
+    return _preview_or_done(True, "experiments_experiment_promote", details)

@@ -40,6 +40,25 @@ extensions_mcp = FastMCP("extensions")
 _WRITE = ToolAnnotations(readOnlyHint=False, destructiveHint=False)
 _READ = ToolAnnotations(readOnlyHint=True)
 
+# Ground truth for every field_type this module can attach. attach_assets
+# accepts all eight; remove_campaign_asset and list_campaign_assets used to
+# only cover the first three, so BUSINESS_NAME, BUSINESS_LOGO, AD_IMAGE,
+# LOGO and LANDSCAPE_LOGO assets could be attached but never listed or
+# detached again. Shared here so the three stay in sync by construction.
+_ATTACHABLE_FIELD_TYPES = (
+    "SITELINK",
+    "CALLOUT",
+    "STRUCTURED_SNIPPET",
+    "BUSINESS_NAME",
+    "BUSINESS_LOGO",
+    "AD_IMAGE",
+    "LOGO",
+    "LANDSCAPE_LOGO",
+)
+_ATTACHABLE_FIELD_TYPES_GAQL = ", ".join(
+    f"'{ft}'" for ft in _ATTACHABLE_FIELD_TYPES
+)
+
 
 def _campaign_link_op(client, customer_id, campaign_id, asset_rn, field_type):
     op = client.get_type("MutateOperation")
@@ -292,18 +311,8 @@ def attach_assets(
     """
     customer_id = _clean_customer_id(customer_id)
     field_type = field_type.upper()
-    allowed = (
-        "SITELINK",
-        "CALLOUT",
-        "STRUCTURED_SNIPPET",
-        "BUSINESS_NAME",
-        "BUSINESS_LOGO",
-        "AD_IMAGE",
-        "LOGO",
-        "LANDSCAPE_LOGO",
-    )
-    if field_type not in allowed:
-        raise ToolError(f"field_type must be one of {allowed}")
+    if field_type not in _ATTACHABLE_FIELD_TYPES:
+        raise ToolError(f"field_type must be one of {_ATTACHABLE_FIELD_TYPES}")
     if not asset_ids:
         raise ToolError("asset_ids must not be empty")
 
@@ -357,15 +366,14 @@ def remove_campaign_asset(
         customer_id: The client account id (digits only, no hyphens).
         campaign_id: The numeric id of the campaign.
         asset_id: The numeric id of the linked asset.
-        field_type: SITELINK, CALLOUT or STRUCTURED_SNIPPET.
+        field_type: SITELINK, CALLOUT, STRUCTURED_SNIPPET, BUSINESS_NAME,
+            BUSINESS_LOGO, AD_IMAGE, LOGO or LANDSCAPE_LOGO.
         confirm: False = dry-run preview (default), True = apply.
     """
     customer_id = _clean_customer_id(customer_id)
     field_type = field_type.upper()
-    if field_type not in ("SITELINK", "CALLOUT", "STRUCTURED_SNIPPET"):
-        raise ToolError(
-            "field_type must be SITELINK, CALLOUT or STRUCTURED_SNIPPET"
-        )
+    if field_type not in _ATTACHABLE_FIELD_TYPES:
+        raise ToolError(f"field_type must be one of {_ATTACHABLE_FIELD_TYPES}")
 
     client = utils.get_googleads_client()
     ca_service = utils.get_googleads_service("CampaignAssetService")
@@ -405,12 +413,13 @@ def list_campaign_assets(
     campaign_id: str,
     limit: int = 200,
 ) -> Dict[str, Any]:
-    """List sitelink/callout/snippet assets linked to a campaign.
+    """List extension assets linked to a campaign.
 
     WHEN TO USE: to get the asset ids needed by
     extensions_remove_campaign_asset, or to copy a campaign's extensions
-    onto another with extensions_attach_assets. Only SITELINK, CALLOUT
-    and STRUCTURED_SNIPPET links are returned, REMOVED ones excluded.
+    onto another with extensions_attach_assets. Only SITELINK, CALLOUT,
+    STRUCTURED_SNIPPET, BUSINESS_NAME, BUSINESS_LOGO, AD_IMAGE, LOGO and
+    LANDSCAPE_LOGO links are returned, REMOVED ones excluded.
     Returns {"items": [...], "returned": n, "truncated": bool}. When
     truncated is true the campaign has more linked assets than limit, so an
     asset missing from items means "not listed", NOT "not linked" — raise
@@ -426,13 +435,14 @@ def list_campaign_assets(
     ga_service = utils.get_googleads_service("GoogleAdsService")
     query = (
         "SELECT campaign_asset.asset, campaign_asset.field_type, "
-        "campaign_asset.status, asset.id, asset.sitelink_asset.link_text, "
+        "campaign_asset.status, asset.id, asset.name, "
+        "asset.sitelink_asset.link_text, "
         "asset.callout_asset.callout_text, "
         "asset.structured_snippet_asset.header "
         "FROM campaign_asset "
         f"WHERE campaign.id = {int(campaign_id)} "
         "AND campaign_asset.field_type IN "
-        "('SITELINK', 'CALLOUT', 'STRUCTURED_SNIPPET') "
+        f"({_ATTACHABLE_FIELD_TYPES_GAQL}) "
         "AND campaign_asset.status != 'REMOVED' "
         "ORDER BY asset.id "
         # One row past the cap: reading it back is how truncation is
@@ -444,10 +454,16 @@ def list_campaign_assets(
         out = []
         for row in rows:
             ft = row.campaign_asset.field_type.name
+            # sitelink/callout/structured_snippet assets carry their text
+            # in that type's own sub-message; every other attachable type
+            # (BUSINESS_NAME, BUSINESS_LOGO, AD_IMAGE, LOGO,
+            # LANDSCAPE_LOGO) has no text sub-message at all, so asset.name
+            # is the only human-readable label available for them.
             text = (
                 row.asset.sitelink_asset.link_text
                 or row.asset.callout_asset.callout_text
                 or row.asset.structured_snippet_asset.header
+                or row.asset.name
             )
             out.append(
                 {

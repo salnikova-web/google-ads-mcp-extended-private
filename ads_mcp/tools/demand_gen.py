@@ -136,7 +136,7 @@ def asset_upload_image(
     }
     if confirm:
         details["created_resource"] = response.results[0].resource_name
-    return _preview_or_done(confirm, "asset_upload_image", details)
+    return _preview_or_done(confirm, "demandgen_asset_upload_image", details)
 
 
 @demandgen_mcp.tool(annotations=_WRITE)
@@ -184,7 +184,9 @@ def asset_create_youtube_video(
     }
     if confirm:
         details["created_resource"] = response.results[0].resource_name
-    return _preview_or_done(confirm, "asset_create_youtube_video", details)
+    return _preview_or_done(
+        confirm, "demandgen_asset_create_youtube_video", details
+    )
 
 
 @demandgen_mcp.tool(annotations=_READ)

@@ -66,6 +66,23 @@ def _sent_requests(mock_service):
     ]
 
 
+def _mounted_tool_name(fn) -> str:
+    """The namespace-prefixed name ``fn`` is actually exposed under.
+
+    Mirrors coordinator.py's mount step: the prefix is the .name of the
+    module's own FastMCP sub-server (e.g. ads_mcp.tools.demand_gen mounts
+    as "demandgen", not its file name), joined to the bare function name —
+    every tool here is registered under its own name (no decorator ever
+    passes ``name=``), so no separate lookup against tools/list is needed.
+    """
+    module = importlib.import_module(fn.__module__)
+    for attr_name in dir(module):
+        attr = getattr(module, attr_name)
+        if isinstance(attr, FastMCP):
+            return f"{attr.name}_{fn.__name__}"
+    raise AssertionError(f"no FastMCP sub-server found in {fn.__module__}")
+
+
 class TestWriteToolInvariants(unittest.TestCase):
     """Reflection-based invariants over all 80+ write tools."""
 
@@ -252,6 +269,21 @@ class TestValidateOnlySamples(unittest.TestCase):
                 for request in requests:
                     self.assertIs(request.validate_only, False)
                 self.assertIs(result["applied"], True)
+
+    def test_dry_run_action_matches_mounted_tool_name(self):
+        """The envelope's action must name the tool a caller can actually
+        invoke — the namespace-prefixed name tools/list exposes — not the
+        bare function name the module defines it under.
+
+        Reuses the SAMPLES plumbing above rather than adding new mocking:
+        every dry-run result already carries an "action" key straight from
+        _preview_or_done, so no source scan is needed to check it.
+        """
+        for fn, args, kwargs in self.SAMPLES:
+            with self.subTest(tool=fn.__name__):
+                self.service.reset_mock()
+                result = fn(*args, **kwargs)
+                self.assertEqual(result.get("action"), _mounted_tool_name(fn))
 
 
 class TestBehavioralSampleCoverage(unittest.TestCase):

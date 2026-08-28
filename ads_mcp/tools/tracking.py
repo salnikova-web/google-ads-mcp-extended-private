@@ -99,7 +99,7 @@ def campaign_set_tracking(
         details["updated_resource"] = response.results[0].resource_name
     elif will_clear:
         details["will_clear"] = will_clear
-    return _preview_or_done(confirm, "tracking_campaign_set", details)
+    return _preview_or_done(confirm, "tracking_campaign_set_tracking", details)
 
 
 @tracking_mcp.tool(annotations=_WRITE)
@@ -168,7 +168,7 @@ def account_set_tracking(
         details["updated_resource"] = response.result.resource_name
     elif will_clear:
         details["will_clear"] = will_clear
-    return _preview_or_done(confirm, "tracking_account_set", details)
+    return _preview_or_done(confirm, "tracking_account_set_tracking", details)
 
 
 @tracking_mcp.tool(annotations=_READ)

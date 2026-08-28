@@ -378,7 +378,7 @@ def campaign_create(
             or r.campaign_result.resource_name
             for r in response.mutate_operation_responses
         ]
-    return _preview_or_done(confirm, "campaign_create", details)
+    return _preview_or_done(confirm, "mutate_campaign_create", details)
 
 
 @mutate_mcp.tool(
@@ -444,7 +444,7 @@ def campaign_update_status(
     }
     if confirm:
         details["updated_resource"] = response.results[0].resource_name
-    return _preview_or_done(confirm, "campaign_update_status", details)
+    return _preview_or_done(confirm, "mutate_campaign_update_status", details)
 
 
 @mutate_mcp.tool(annotations=_WRITE_ANNOTATIONS)
@@ -573,7 +573,9 @@ def campaign_update_status_batch(
         details["failed"] = len(failed)
         details["succeeded_campaigns"] = succeeded
         details["failed_campaigns"] = failed
-    return _preview_or_done(confirm, "campaign_update_status_batch", details)
+    return _preview_or_done(
+        confirm, "mutate_campaign_update_status_batch", details
+    )
 
 
 @mutate_mcp.tool(annotations=_WRITE_ANNOTATIONS)
@@ -632,7 +634,7 @@ def campaign_set_target_roas(
     }
     if confirm:
         details["updated_resource"] = response.results[0].resource_name
-    return _preview_or_done(confirm, "campaign_set_target_roas", details)
+    return _preview_or_done(confirm, "mutate_campaign_set_target_roas", details)
 
 
 @mutate_mcp.tool(annotations=_WRITE_ANNOTATIONS)
@@ -693,7 +695,7 @@ def campaign_set_merchant(
     }
     if confirm:
         details["updated_resource"] = response.results[0].resource_name
-    return _preview_or_done(confirm, "campaign_set_merchant", details)
+    return _preview_or_done(confirm, "mutate_campaign_set_merchant", details)
 
 
 @mutate_mcp.tool(annotations=_WRITE_ANNOTATIONS)
@@ -856,7 +858,7 @@ def campaign_update_settings(
     }
     if confirm:
         details["updated_resource"] = response.results[0].resource_name
-    return _preview_or_done(confirm, "campaign_update_settings", details)
+    return _preview_or_done(confirm, "mutate_campaign_update_settings", details)
 
 
 @mutate_mcp.tool(annotations=_WRITE_ANNOTATIONS)
@@ -931,7 +933,7 @@ def campaign_rename(
     }
     if confirm:
         details["updated_resource"] = response.results[0].resource_name
-    return _preview_or_done(confirm, "campaign_rename", details)
+    return _preview_or_done(confirm, "mutate_campaign_rename", details)
 
 
 @mutate_mcp.tool(annotations=_WRITE_ANNOTATIONS)
@@ -1023,7 +1025,7 @@ def campaign_budget_update(
         )
     if confirm:
         details["updated_resource"] = response.results[0].resource_name
-    return _preview_or_done(confirm, "campaign_budget_update", details)
+    return _preview_or_done(confirm, "mutate_campaign_budget_update", details)
 
 
 @mutate_mcp.tool(annotations=_WRITE_ANNOTATIONS)
@@ -1274,7 +1276,9 @@ def campaign_budget_update_batch(
         details["failed"] = len(failed)
         details["succeeded_campaigns"] = succeeded
         details["failed_campaigns"] = failed
-    return _preview_or_done(confirm, "campaign_budget_update_batch", details)
+    return _preview_or_done(
+        confirm, "mutate_campaign_budget_update_batch", details
+    )
 
 
 @mutate_mcp.tool(annotations=_WRITE_ANNOTATIONS)
@@ -1344,7 +1348,7 @@ def ad_group_create(
     }
     if confirm:
         details["created_resource"] = response.results[0].resource_name
-    return _preview_or_done(confirm, "ad_group_create", details)
+    return _preview_or_done(confirm, "mutate_ad_group_create", details)
 
 
 @mutate_mcp.tool(
@@ -1413,7 +1417,9 @@ def ad_group_update(
             details_removed["removed_resource"] = response.results[
                 0
             ].resource_name
-        return _preview_or_done(confirm, "ad_group_update", details_removed)
+        return _preview_or_done(
+            confirm, "mutate_ad_group_update", details_removed
+        )
     ad_group = operation.update
     ad_group.resource_name = f"customers/{customer_id}/adGroups/{ad_group_id}"
     # Each path is appended inside its own branch: a field the caller did
@@ -1452,7 +1458,7 @@ def ad_group_update(
     }
     if confirm:
         details["updated_resource"] = response.results[0].resource_name
-    return _preview_or_done(confirm, "ad_group_update", details)
+    return _preview_or_done(confirm, "mutate_ad_group_update", details)
 
 
 @mutate_mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
@@ -1707,7 +1713,7 @@ def keywords_add(
                 "exemption claiming the violation is a false positive. The "
                 "dry-run cannot show which keywords that would affect."
             )
-    return _preview_or_done(confirm, "keywords_add", details)
+    return _preview_or_done(confirm, "mutate_keywords_add", details)
 
 
 @mutate_mcp.tool(
@@ -1771,7 +1777,7 @@ def keywords_remove(
         details["removed_resources"] = [
             r.resource_name for r in response.results
         ]
-    return _preview_or_done(confirm, "keywords_remove", details)
+    return _preview_or_done(confirm, "mutate_keywords_remove", details)
 
 
 @mutate_mcp.tool(annotations=_WRITE_ANNOTATIONS)
@@ -1872,7 +1878,7 @@ def ad_create_rsa(
     }
     if confirm:
         details["created_resource"] = response.results[0].resource_name
-    return _preview_or_done(confirm, "ad_create_rsa", details)
+    return _preview_or_done(confirm, "mutate_ad_create_rsa", details)
 
 
 @mutate_mcp.tool(
@@ -1942,7 +1948,7 @@ def ad_update_status(
     }
     if confirm:
         details["updated_resource"] = response.results[0].resource_name
-    return _preview_or_done(confirm, "ad_update_status", details)
+    return _preview_or_done(confirm, "mutate_ad_update_status", details)
 
 
 @mutate_mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
@@ -2132,12 +2138,14 @@ def campaign_set_conversion_goals(
         details["validation"] = _GOAL_FLIP_VALIDATION
         return _preview_or_done(
             False,
-            "campaign_set_conversion_goals",
+            "mutate_campaign_set_conversion_goals",
             details,
             validated=False,
             note=_GOAL_FLIP_DRY_RUN_NOTE,
         )
-    return _preview_or_done(True, "campaign_set_conversion_goals", details)
+    return _preview_or_done(
+        True, "mutate_campaign_set_conversion_goals", details
+    )
 
 
 @mutate_mcp.tool(annotations=_WRITE_ANNOTATIONS)
@@ -2259,12 +2267,12 @@ def campaign_set_custom_conversion_goal(
         details["validation"] = _GOAL_FLIP_VALIDATION
         return _preview_or_done(
             False,
-            "campaign_set_custom_conversion_goal",
+            "mutate_campaign_set_custom_conversion_goal",
             details,
             validated=False,
             note=_GOAL_FLIP_DRY_RUN_NOTE,
         )
     details["updated_resource"] = response.results[0].resource_name
     return _preview_or_done(
-        True, "campaign_set_custom_conversion_goal", details
+        True, "mutate_campaign_set_custom_conversion_goal", details
     )
