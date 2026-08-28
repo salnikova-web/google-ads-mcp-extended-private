@@ -19,8 +19,13 @@
   `negatives_list_shared_sets`, `tracking_list_tracking`,
   `experiments_experiments_list`, `pmax_list_asset_groups`,
   `audiences_list_audiences`) повертають конверт `{items|<ключ>,
-  returned, truncated}` і додають рядок `warning`, коли truncated=true.
-  Мовчазного обрізання більше немає.
+  returned, truncated}` і додають рядок `warning`, коли truncated=true —
+  мовчазного обрізання більше немає. Два винятки з форми конверта:
+  `tracking_list_tracking` не має `returned` (`{account, campaigns,
+  truncated, warning?}`), `audiences_list_audiences` має `truncated` не
+  булевим, а мапою по трьох секціях (`{audiences, user_lists,
+  custom_segments}`) — `warning` в обох так само з'являється лише коли
+  щось реально обрізано.
 - Truncated ≠ повний список. Відсутність рядка в обрізаному списку ≠
   «не існує» — рядок міг лишитись за лімітом. При truncated: підняти
   `limit` або звузити фільтр, і переказати `warning` користувачці перед

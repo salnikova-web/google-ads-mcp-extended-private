@@ -20,15 +20,15 @@ cohort-method.md): mature/PMax із плюсовим ROI не мають бут�
 - `optimize_recommendation_apply` — у dry-run НЕ звертається до Google
   (локальне прев'ю), помилка вилізе лише на confirm=true.
 - Будь-які bulk-операції — прев'ю поштучно, не сумарно.
-- Видалення через `status="REMOVED"` роблять кілька інструментів; усі
-  вони, включно з чотирма, де раніше `destructiveHint` хибно стояв
-  `False` (`mutate_campaign_update_status`, `mutate_ad_group_update`,
-  `mutate_ad_update_status`, `pmax_asset_group_update`), тепер несуть
-  `destructiveHint=true` — виправлено хардненням 0.1.0 (перевірено:
-  усі чотири мають явний `ToolAnnotations(readOnlyHint=False,
-  destructiveHint=True)` у коді). Клієнт більше не авто-апрувить їх
-  мовчки, але подвійне підтвердження поіменним переліком «видаляю
-  X, Y, Z — так?» лишається доброю практикою поверх клієнтського гейту.
+- Видалення через `status="REMOVED"` роблять кілька інструментів; у
+  чотирьох з них (`mutate_campaign_update_status`,
+  `mutate_ad_group_update`, `mutate_ad_update_status`,
+  `pmax_asset_group_update`) `destructiveHint` раніше хибно стояв
+  `False` — виправлено хардненням 0.1.0: анотація `destructiveHint=True`
+  тепер стоїть на всіх чотирьох (перевірено в коді: явний
+  `ToolAnnotations(readOnlyHint=False, destructiveHint=True)` на
+  кожному). Подвійне підтвердження поіменним переліком «видаляю
+  X, Y, Z — так?» лишається доброю практикою.
 - `demandgen_ad_create_video`: тайпо в `call_to_action` тепер ловиться на
   dry-run теж — enum резолвиться і кидає помилку до відправки запиту,
   незалежно від `confirm` (виправлено хардненням 0.1.0). Резидуальний

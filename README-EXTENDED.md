@@ -410,10 +410,13 @@ Notable changes compared to earlier revisions of these tools:
   results carry a `"truncated"` flag; list-shaped ones return a wrapper dict
   with the item list (key `"items"`, or `"asset_groups"` /
   `"experiments"` for the PMax and experiments listings) plus `"returned"`
-  and `"truncated"`. Whenever `"truncated"` is true the result also carries
-  a `"warning"` string spelling out what was cut — the key is present only
-  when the list was actually truncated, so its presence alone is the
-  signal. An entry missing
+  and `"truncated"`. Whenever `"truncated"` is true, each of these 12 list
+  tools also carries a singular `"warning"` string spelling out what was
+  cut — the key is present only when the list was actually truncated, so
+  its presence alone is the signal. (`metadata_get_resource_metadata` and
+  `metadata_get_field_details` follow the same "only present when
+  truncated" rule but under a plural `"warnings"` list instead, since they
+  can report more than one issue at once.) An entry missing
   from a truncated listing means "not listed", not "does not exist" — raise
   the `limit` or narrow the query before concluding something is absent.
 - **An empty `namespaces:` block enables nothing.** In `tools_config.yaml`,
