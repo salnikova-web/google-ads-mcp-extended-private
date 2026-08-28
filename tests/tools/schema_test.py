@@ -15,7 +15,12 @@
 """Tests for tool schema correctness and type safety."""
 
 import unittest
-from ads_mcp.coordinator import mcp
+from unittest.mock import patch
+
+from fastmcp import FastMCP
+
+from ads_mcp.config import ToolsConfig
+from ads_mcp.coordinator import initialize_and_mount_tools, mcp
 
 # Import server to ensure all tools are registered on the mcp object
 from ads_mcp import server  # noqa: F401
@@ -99,3 +104,45 @@ class TestToolSchemas(unittest.IsolatedAsyncioTestCase):
                 [],
                 f"Parameter '{param}' default must be an empty list",
             )
+
+
+class TestEnumSchemaAdvertisement(unittest.IsolatedAsyncioTestCase):
+    """Verifies Task 2.2: enum-like params advertise their accepted values.
+
+    Uses Annotated[str, Field(json_schema_extra={"enum": [...]})] rather
+    than Literal, so runtime validation stays the existing lax .upper() +
+    explicit ToolError checks (a true Literal would reject lowercase input
+    that works today). Mounts a fresh FastMCP (per the existing
+    tools_mounting_test.py pattern) instead of relying on ads_mcp.server's
+    singleton, so this test does not depend on load order.
+    """
+
+    @patch("ads_mcp.config.ToolsConfig.load")
+    async def test_channel_type_and_match_type_enums_are_advertised(
+        self, mock_load
+    ):
+        mock_load.return_value = ToolsConfig({"namespaces": {"mutate": True}})
+        parent = FastMCP("Test Parent")
+        initialize_and_mount_tools(parent)
+
+        tools = {t.name: t for t in await parent.list_tools()}
+
+        channel_type = tools["mutate_campaign_create"].parameters["properties"][
+            "channel_type"
+        ]
+        self.assertEqual(
+            channel_type["enum"],
+            [
+                "SEARCH",
+                "DISPLAY",
+                "SHOPPING",
+                "VIDEO",
+                "PERFORMANCE_MAX",
+                "DEMAND_GEN",
+            ],
+        )
+
+        match_type = tools["mutate_keywords_add"].parameters["properties"][
+            "match_type"
+        ]
+        self.assertEqual(match_type["enum"], ["EXACT", "PHRASE", "BROAD"])

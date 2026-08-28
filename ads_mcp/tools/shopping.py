@@ -23,11 +23,12 @@ Safety model: identical to ads_mcp.tools.mutate — every write tool accepts
 """
 
 import time
-from typing import Any, Dict, List, Optional
+from typing import Annotated, Any, Dict, List, Optional
 
 from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
 from mcp.types import ToolAnnotations
+from pydantic import Field
 from google.ads.googleads.errors import GoogleAdsException
 
 import ads_mcp.utils as utils
@@ -42,6 +43,26 @@ shopping_mcp = FastMCP("shopping")
 
 _WRITE = ToolAnnotations(readOnlyHint=False, destructiveHint=False)
 
+# Schema-only aliases: advertise the accepted values in tools/list via
+# json_schema_extra while runtime validation stays the existing lax
+# .upper() + explicit ToolError checks (a true Literal would reject
+# lowercase input that works today).
+_STATUS_ENUM = Annotated[
+    str, Field(json_schema_extra={"enum": ["PAUSED", "ENABLED"]})
+]
+_BIDDING_ENUM = Annotated[
+    str,
+    Field(
+        json_schema_extra={
+            "enum": [
+                "MANUAL_CPC",
+                "MAXIMIZE_CLICKS",
+                "MAXIMIZE_CONVERSION_VALUE",
+            ]
+        }
+    ),
+]
+
 
 @shopping_mcp.tool(annotations=_WRITE)
 def campaign_create(
@@ -51,11 +72,11 @@ def campaign_create(
     merchant_id: str,
     feed_label: Optional[str] = None,
     campaign_priority: int = 0,
-    bidding_strategy: str = "MANUAL_CPC",
+    bidding_strategy: _BIDDING_ENUM = "MANUAL_CPC",
     target_roas: Optional[float] = None,
     tracking_url_template: Optional[str] = None,
     final_url_suffix: Optional[str] = None,
-    status: str = "PAUSED",
+    status: _STATUS_ENUM = "PAUSED",
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
     confirm: bool = False,
@@ -83,7 +104,6 @@ def campaign_create(
             MAXIMIZE_CONVERSION_VALUE (optionally with target_roas).
         target_roas: Optional target ROAS as decimal (only with
             MAXIMIZE_CONVERSION_VALUE).
-        status: PAUSED (default) or ENABLED.
         confirm: False = dry-run preview (default), True = apply.
     """
     customer_id = _clean_customer_id(customer_id)
@@ -202,7 +222,7 @@ def ad_group_create(
     campaign_id: str,
     name: str,
     cpc_bid: Optional[float] = None,
-    status: str = "PAUSED",
+    status: _STATUS_ENUM = "PAUSED",
     confirm: bool = False,
 ) -> Dict[str, Any]:
     """Creates a SHOPPING_PRODUCT_ADS ad group in a Shopping campaign.
@@ -215,7 +235,6 @@ def ad_group_create(
         name: Ad group name.
         cpc_bid: Optional max CPC in account currency (used with manual
             bidding).
-        status: PAUSED (default) or ENABLED.
         confirm: False = dry-run preview (default), True = apply.
     """
     customer_id = _clean_customer_id(customer_id)
@@ -261,7 +280,7 @@ def ad_group_create(
 def ad_create_product(
     customer_id: str,
     ad_group_id: str,
-    status: str = "PAUSED",
+    status: _STATUS_ENUM = "PAUSED",
     confirm: bool = False,
 ) -> Dict[str, Any]:
     """Creates a product ad in a Shopping ad group.
@@ -272,7 +291,6 @@ def ad_create_product(
     Args:
         customer_id: The client account id (digits only, no hyphens).
         ad_group_id: The numeric id of the Shopping ad group.
-        status: PAUSED (default) or ENABLED.
         confirm: False = dry-run preview (default), True = apply.
     """
     customer_id = _clean_customer_id(customer_id)

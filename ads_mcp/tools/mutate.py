@@ -25,11 +25,12 @@ returns a preview. Call the tool again with ``confirm=True`` to apply.
 
 import math
 import time
-from typing import Any, Dict, List, Optional
+from typing import Annotated, Any, Dict, List, Optional
 
 from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
 from mcp.types import ToolAnnotations
+from pydantic import Field
 from google.ads.googleads.errors import GoogleAdsException
 from google.api_core import protobuf_helpers
 
@@ -72,6 +73,23 @@ _ALLOWED_BIDDING = [
 ]
 
 _ALLOWED_CAMPAIGN_STATUSES = ["ENABLED", "PAUSED", "REMOVED"]
+
+# Schema-only aliases: advertise the accepted values in tools/list via
+# json_schema_extra while runtime validation stays the existing lax
+# .upper() + explicit ToolError checks below (a true Literal would reject
+# lowercase input that works today).
+_CHANNEL_TYPE_ENUM = Annotated[
+    str, Field(json_schema_extra={"enum": _ALLOWED_CHANNEL_TYPES})
+]
+_BIDDING_ENUM = Annotated[
+    str, Field(json_schema_extra={"enum": _ALLOWED_BIDDING})
+]
+_STATUS_ENUM = Annotated[
+    str, Field(json_schema_extra={"enum": ["PAUSED", "ENABLED"]})
+]
+_MATCH_TYPE_ENUM = Annotated[
+    str, Field(json_schema_extra={"enum": ["EXACT", "PHRASE", "BROAD"]})
+]
 
 
 # Kept under this name: 12 write modules import it from here.
@@ -181,13 +199,13 @@ def campaign_create(
     customer_id: str,
     name: str,
     daily_budget: float,
-    channel_type: str = "SEARCH",
-    bidding_strategy: str = "MAXIMIZE_CONVERSIONS",
+    channel_type: _CHANNEL_TYPE_ENUM = "SEARCH",
+    bidding_strategy: _BIDDING_ENUM = "MAXIMIZE_CONVERSIONS",
     target_cpa: Optional[float] = None,
     target_roas: Optional[float] = None,
     tracking_url_template: Optional[str] = None,
     final_url_suffix: Optional[str] = None,
-    status: str = "PAUSED",
+    status: _STATUS_ENUM = "PAUSED",
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
     confirm: bool = False,
@@ -209,17 +227,13 @@ def campaign_create(
         name: Campaign name (must be unique within the account).
         daily_budget: Daily budget in the account currency (e.g. 50.0 = €50
             for EUR accounts). Converted to micros automatically.
-        channel_type: One of SEARCH, DISPLAY, SHOPPING, VIDEO,
-            PERFORMANCE_MAX, DEMAND_GEN. Note: PERFORMANCE_MAX campaigns also
+        channel_type: Note: PERFORMANCE_MAX campaigns also
             require asset groups, which are not yet supported here — create
             the campaign PAUSED and finish setup in the UI.
-        bidding_strategy: One of MAXIMIZE_CONVERSIONS,
-            MAXIMIZE_CONVERSION_VALUE, MAXIMIZE_CLICKS, MANUAL_CPC.
         target_cpa: Optional target CPA in account currency
             (only with MAXIMIZE_CONVERSIONS).
         target_roas: Optional target ROAS as a decimal, e.g. 3.5 = 350%
             (only with MAXIMIZE_CONVERSION_VALUE).
-        status: PAUSED (default, recommended) or ENABLED.
         confirm: False = dry-run preview (default), True = apply changes.
 
     Returns:
@@ -403,7 +417,7 @@ def campaign_update_status(
 def campaign_update_status_batch(
     customer_id: str,
     campaign_ids: List[str],
-    status: str,
+    status: _STATUS_ENUM,
     confirm: bool = False,
 ) -> Dict[str, Any]:
     """Pauses or enables SEVERAL campaigns in one request.
@@ -428,7 +442,7 @@ def campaign_update_status_batch(
     Args:
         customer_id: The client account id (digits only, no hyphens).
         campaign_ids: Numeric campaign ids, up to 100.
-        status: ENABLED or PAUSED (applied to every listed campaign).
+        status: Applied to every listed campaign.
         confirm: False = dry-run preview (default), True = apply changes.
     """
     customer_id = _clean_customer_id(customer_id)
@@ -1204,7 +1218,7 @@ def ad_group_create(
     campaign_id: str,
     name: str,
     cpc_bid: Optional[float] = None,
-    status: str = "PAUSED",
+    status: _STATUS_ENUM = "PAUSED",
     confirm: bool = False,
 ) -> Dict[str, Any]:
     """Creates a new ad group (SEARCH_STANDARD) inside an existing campaign.
@@ -1217,7 +1231,6 @@ def ad_group_create(
         campaign_id: The numeric id of the parent campaign.
         name: Ad group name (unique within the campaign).
         cpc_bid: Optional max CPC bid in account currency (e.g. 1.5 = €1.50).
-        status: PAUSED (default) or ENABLED.
         confirm: False = dry-run preview (default), True = apply changes.
     """
     customer_id = _clean_customer_id(customer_id)
@@ -1445,7 +1458,7 @@ def keywords_add(
     customer_id: str,
     ad_group_id: str,
     keywords: List[str],
-    match_type: str = "BROAD",
+    match_type: _MATCH_TYPE_ENUM = "BROAD",
     negative: bool = False,
     cpc_bid: Optional[float] = None,
     auto_exempt: bool = False,
@@ -1475,8 +1488,8 @@ def keywords_add(
         ad_group_id: The numeric id of the ad group.
         keywords: List of keyword texts, e.g. ["weight loss app",
             "fitness plan"].
-        match_type: EXACT, PHRASE or BROAD (applies to all keywords in the
-            call; make separate calls for different match types).
+        match_type: Applies to all keywords in the call; make separate
+            calls for different match types.
         negative: True to add as ad-group-level negative keywords.
         cpc_bid: Optional max CPC bid in account currency (ignored for
             negative keywords).
@@ -1685,7 +1698,7 @@ def ad_create_rsa(
     path1: Optional[str] = None,
     path2: Optional[str] = None,
     tracking_url_template: Optional[str] = None,
-    status: str = "PAUSED",
+    status: _STATUS_ENUM = "PAUSED",
     confirm: bool = False,
 ) -> Dict[str, Any]:
     """Creates a Responsive Search Ad (RSA) in an ad group.
@@ -1701,7 +1714,6 @@ def ad_create_rsa(
         final_url: Landing page URL (include UTM parameters here if needed).
         path1: Optional display path 1 (max 15 chars).
         path2: Optional display path 2 (max 15 chars, requires path1).
-        status: PAUSED (default) or ENABLED.
         confirm: False = dry-run preview (default), True = apply changes.
     """
     customer_id = _clean_customer_id(customer_id)

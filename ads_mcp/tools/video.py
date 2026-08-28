@@ -23,11 +23,12 @@ Safety model: identical to ads_mcp.tools.mutate — every write tool accepts
 """
 
 import time
-from typing import Any, Dict, List, Optional
+from typing import Annotated, Any, Dict, List, Optional
 
 from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
 from mcp.types import ToolAnnotations
+from pydantic import Field
 from google.ads.googleads.errors import GoogleAdsException
 
 import ads_mcp.utils as utils
@@ -41,6 +42,22 @@ from ads_mcp.tools.mutate import (
 video_mcp = FastMCP("video")
 
 _WRITE = ToolAnnotations(readOnlyHint=False, destructiveHint=False)
+
+# Schema-only aliases: advertise the accepted values in tools/list via
+# json_schema_extra while runtime validation stays the existing lax
+# .upper() + explicit ToolError checks (a true Literal would reject
+# lowercase input that works today).
+_STATUS_ENUM = Annotated[
+    str, Field(json_schema_extra={"enum": ["PAUSED", "ENABLED"]})
+]
+_BIDDING_ENUM = Annotated[
+    str,
+    Field(
+        json_schema_extra={
+            "enum": ["MAXIMIZE_CONVERSIONS", "MAXIMIZE_CONVERSION_VALUE"]
+        }
+    ),
+]
 
 
 def _text_assets(client, texts: List[str]):
@@ -57,10 +74,10 @@ def campaign_create(
     customer_id: str,
     name: str,
     daily_budget: float,
-    bidding_strategy: str = "MAXIMIZE_CONVERSIONS",
+    bidding_strategy: _BIDDING_ENUM = "MAXIMIZE_CONVERSIONS",
     target_cpa: Optional[float] = None,
     target_roas: Optional[float] = None,
-    status: str = "PAUSED",
+    status: _STATUS_ENUM = "PAUSED",
     confirm: bool = False,
 ) -> Dict[str, Any]:
     """Creates a Video campaign (YouTube) with a dedicated daily budget.
@@ -77,7 +94,6 @@ def campaign_create(
             MAXIMIZE_CONVERSION_VALUE (optional target_roas).
         target_cpa: Optional target CPA in account currency.
         target_roas: Optional target ROAS as decimal.
-        status: PAUSED (default) or ENABLED.
         confirm: False = dry-run preview (default), True = apply.
     """
     raise ToolError(
@@ -182,7 +198,7 @@ def ad_group_create(
     customer_id: str,
     campaign_id: str,
     name: str,
-    status: str = "PAUSED",
+    status: _STATUS_ENUM = "PAUSED",
     confirm: bool = False,
 ) -> Dict[str, Any]:
     """Creates a VIDEO_RESPONSIVE ad group in a Video campaign.
@@ -193,7 +209,6 @@ def ad_group_create(
         customer_id: The client account id (digits only, no hyphens).
         campaign_id: The numeric id of the Video campaign.
         name: Ad group name.
-        status: PAUSED (default) or ENABLED.
         confirm: False = dry-run preview (default), True = apply.
     """
     customer_id = _clean_customer_id(customer_id)
@@ -243,7 +258,7 @@ def ad_create_responsive(
     long_headlines: List[str],
     descriptions: List[str],
     tracking_url_template: Optional[str] = None,
-    status: str = "PAUSED",
+    status: _STATUS_ENUM = "PAUSED",
     confirm: bool = False,
 ) -> Dict[str, Any]:
     """Creates a responsive video ad in a Video ad group.
@@ -260,7 +275,6 @@ def ad_create_responsive(
         headlines: 1-5 short headlines (recommended max 30 chars).
         long_headlines: 1-5 long headlines (recommended max 90 chars).
         descriptions: 1-5 descriptions (recommended max 90 chars).
-        status: PAUSED (default) or ENABLED.
         confirm: False = dry-run preview (default), True = apply.
     """
     customer_id = _clean_customer_id(customer_id)

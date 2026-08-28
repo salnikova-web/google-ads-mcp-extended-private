@@ -6,11 +6,12 @@
 Safety model: ``confirm=False`` (default) = validate_only dry-run.
 """
 
-from typing import Any, Dict, List
+from typing import Annotated, Any, Dict, List
 
 from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
 from mcp.types import ToolAnnotations
+from pydantic import Field
 from google.ads.googleads.errors import GoogleAdsException
 
 import ads_mcp.utils as utils
@@ -25,19 +26,30 @@ negatives_mcp = FastMCP("negatives")
 _WRITE = ToolAnnotations(readOnlyHint=False, destructiveHint=False)
 _READ = ToolAnnotations(readOnlyHint=True)
 
+# Schema-only alias shared by both match_type sites below: advertises the
+# accepted values in tools/list while runtime validation stays the existing
+# lax .upper() + explicit ToolError check (a true Literal would reject
+# lowercase input that works today).
+_MATCH_TYPE_ENUM = Annotated[
+    str, Field(json_schema_extra={"enum": ["EXACT", "PHRASE", "BROAD"]})
+]
+
 
 @negatives_mcp.tool(annotations=_WRITE)
 def add_campaign_keywords(
     customer_id: str,
     campaign_id: str,
     keywords: List[str],
-    match_type: str = "BROAD",
+    match_type: Annotated[
+        _MATCH_TYPE_ENUM,
+        Field(description="Applies to all keywords in the call."),
+    ] = "BROAD",
     confirm: bool = False,
 ) -> Dict[str, Any]:
     """Adds campaign-level NEGATIVE keywords directly to a campaign.
 
     Works for any channel including Performance Max (which has no ad
-    groups). match_type: EXACT, PHRASE or BROAD.
+    groups).
 
     SAFETY: dry-run by default (validate_only); re-run with confirm=true.
     """
@@ -127,7 +139,7 @@ def shared_set_add_keywords(
     customer_id: str,
     shared_set_id: str,
     keywords: List[str],
-    match_type: str = "BROAD",
+    match_type: _MATCH_TYPE_ENUM = "BROAD",
     confirm: bool = False,
 ) -> Dict[str, Any]:
     """Adds negative keywords to a shared list.
@@ -138,7 +150,6 @@ def shared_set_add_keywords(
         customer_id: The client account id (digits only, no hyphens).
         shared_set_id: The numeric id of the shared set.
         keywords: Keyword texts to exclude.
-        match_type: EXACT, PHRASE or BROAD.
         confirm: False = dry-run preview (default), True = apply.
     """
     customer_id = _clean_customer_id(customer_id)
