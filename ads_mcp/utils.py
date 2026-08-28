@@ -355,7 +355,48 @@ def list_envelope(items: list[Any], cap: int) -> dict[str, Any]:
 
 # Matched as substrings against "<error_code> <message>" uppercased; each
 # matching hint is appended once to the raised ToolError.
+#
+# The first block keys on specific field names taken verbatim from real
+# server logs: each of these was requested repeatedly across sessions,
+# each failed the same way every time, and the generic "verify the field
+# names" hint below never told the agent what to reach for instead. They
+# come first so the specific advice is printed before the generic one.
 _GOOGLE_ADS_ERROR_HINTS = (
+    (
+        # "Unrecognized field(s) in the query: 'campaign.start_date'[,
+        # 'campaign.end_date']." - 8 occurrences.
+        "'CAMPAIGN.START_DATE'",
+        "campaign.start_date / campaign.end_date are not selectable - "
+        "restrict the reporting window with segments.date conditions "
+        "instead, and confirm the campaign resource's real fields with "
+        "the metadata_get_resource_metadata tool",
+    ),
+    (
+        # "Unrecognized fields in the query: 'auction_insight.domain',
+        # ..." - every auction_insight attempt, with metrics.* prefixes
+        # too. The resource is not in the queryable resource list.
+        "'AUCTION_INSIGHT.",
+        "auction_insight is not a queryable GAQL resource in this API "
+        "version - there is no search equivalent, Auction Insights has "
+        "to be exported from the Google Ads UI",
+    ),
+    (
+        # "Unrecognized field in the query: 'metrics.video_views'." -
+        # seen on both the asset and the campaign resource.
+        "'METRICS.VIDEO_VIEWS'",
+        "metrics.video_views is not selectable for this resource - list "
+        "the metrics the resource actually supports with the "
+        "metadata_get_resource_metadata tool before re-querying",
+    ),
+    (
+        # "Unrecognized field in the query:
+        # 'campaign.url_expansion_opt_out'."
+        "'CAMPAIGN.URL_EXPANSION_OPT_OUT'",
+        "campaign.url_expansion_opt_out is not a selectable campaign "
+        "field in this API version - look the campaign resource's real "
+        "fields up with the metadata_get_resource_metadata tool rather "
+        "than guessing the PMax URL-expansion setting's name",
+    ),
     (
         "UNRECOGNIZED_FIELD",
         "verify field names with the get_resource_metadata tool",
