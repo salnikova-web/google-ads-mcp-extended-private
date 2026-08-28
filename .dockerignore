@@ -5,6 +5,12 @@ google-ads.yaml
 application_default_credentials.json
 credentials.json
 
+# Private working files and publish tooling — never ship in the image
+CLAUDE.md
+.claude
+scripts
+.gitattributes
+
 # Repository metadata and local build/test state
 .git
 tests
@@ -14,3 +20,4 @@ dist
 .nox
 .venv
 __pycache__
+.coverage*

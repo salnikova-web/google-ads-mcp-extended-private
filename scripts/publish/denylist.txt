@@ -1,0 +1,19 @@
+# Terms that must never appear in the public export, matched
+# case-insensitively as substrings of file contents AND file paths by
+# scripts/publish/gate.py. This file lives only in the private repo:
+# scripts/ is export-ignored (.gitattributes) and docker-ignored.
+# Add new company-specific terms here as they enter the private context.
+riseguide
+skelar
+salnikova
+daryna
+solohub
+4561421745
+1268517178
+celebtableau
+prod-uk-a.online.tableau
+dbt_google_marts
+dbt_meta_marts
+dbt_payments_marts
+dbt_marketing_marts
+Станіслав

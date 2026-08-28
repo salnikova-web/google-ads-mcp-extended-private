@@ -1,0 +1,11 @@
+# Paths stripped from every `git archive` export. The public repository is
+# produced exclusively via `git archive` (see scripts/publish/), so nothing
+# listed here can ever reach the public tree. Directory patterns are listed
+# both bare and with /** because .gitattributes does not support trailing-
+# slash directory patterns.
+CLAUDE.md export-ignore
+.claude export-ignore
+.claude/** export-ignore
+scripts export-ignore
+scripts/** export-ignore
+.gitattributes export-ignore
