@@ -14,6 +14,7 @@
 
 """Entry point for the MCP server."""
 
+from ads_mcp.config import oauth_configured
 from ads_mcp.coordinator import mcp
 
 # The following imports are necessary to register the resources with the `mcp`
@@ -97,15 +98,13 @@ def _build_startup_line() -> str:
 
 
 def run_server() -> None:
-    _CLIENT_ID = os.environ.get("GOOGLE_ADS_MCP_OAUTH_CLIENT_ID")
-    _CLIENT_SECRET = os.environ.get("GOOGLE_ADS_MCP_OAUTH_CLIENT_SECRET")
     port = int(os.environ.get("PORT", "8080"))
 
     # stdout carries JSON-RPC under the stdio transport; never print here.
     print(_build_startup_line(), file=sys.stderr)
     _configure_stderr_logging()
 
-    if _CLIENT_ID and _CLIENT_SECRET:
+    if oauth_configured():
         mcp.run(
             transport="streamable-http",
             port=port,

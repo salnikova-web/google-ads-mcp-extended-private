@@ -16,7 +16,13 @@
 
 import unittest
 from unittest.mock import patch, mock_open
-from ads_mcp.config import ALL_CATEGORIES, ToolsConfig
+from ads_mcp.config import (
+    ALL_CATEGORIES,
+    OAUTH_CLIENT_ID_ENV_VAR,
+    OAUTH_CLIENT_SECRET_ENV_VAR,
+    ToolsConfig,
+    oauth_configured,
+)
 
 
 class TestToolsConfig(unittest.TestCase):
@@ -164,8 +170,16 @@ class TestToolsConfig(unittest.TestCase):
         self.assertFalse(config.is_tool_enabled("customers", "another_tool"))
         self.assertFalse(config.is_tool_enabled("customers", "unlisted_tool"))
 
-    def test_enabled_tools_invalid_type_raises_value_error(self):
-        """Tests that a non-list, non-mapping enabled_tools is rejected."""
+    def test_enabled_tools_invalid_type_raises_value_error_at_construction(
+        self,
+    ):
+        """Tests that a non-list, non-mapping enabled_tools is rejected.
+
+        This is now caught eagerly by ToolsConfig.__init__ (via
+        _validate_enabled_tools_shapes), not lazily the first time
+        is_tool_enabled happens to touch the malformed namespace -- so
+        constructing the config is itself what raises.
+        """
         data = {
             "namespaces": {
                 "customers": {
@@ -174,9 +188,33 @@ class TestToolsConfig(unittest.TestCase):
                 }
             }
         }
-        config = ToolsConfig(data)
         with self.assertRaises(ValueError):
+            ToolsConfig(data)
+
+    def test_valid_enabled_tools_shapes_construct_and_filter_lazily(self):
+        """Regression test: valid list/mapping enabled_tools shapes must
+        still construct without raising, and is_tool_enabled must still
+        filter correctly -- the construction-time shape check must not
+        reject the shapes it is supposed to accept.
+        """
+        data = {
+            "namespaces": {
+                "customers": {
+                    "enabled": True,
+                    "enabled_tools": [{"list_accessible_customers": True}],
+                },
+                "search": {
+                    "enabled": True,
+                    "enabled_tools": {"search": False},
+                },
+            }
+        }
+        config = ToolsConfig(data)  # must not raise
+        self.assertTrue(
             config.is_tool_enabled("customers", "list_accessible_customers")
+        )
+        self.assertFalse(config.is_tool_enabled("customers", "other_tool"))
+        self.assertFalse(config.is_tool_enabled("search", "search"))
 
     @patch("os.path.exists")
     def test_load_missing_file_raises_file_not_found(self, mock_exists):
@@ -216,6 +254,30 @@ class TestToolsConfig(unittest.TestCase):
             ToolsConfig.load()
 
     @patch.dict("os.environ", {}, clear=True)
+    @patch("os.path.exists", return_value=True)
+    @patch(
+        "builtins.open",
+        new_callable=mock_open,
+        read_data="namespaces:\n  search: true\n",
+    )
+    def test_load_cwd_fallback_warns(self, mock_file, mock_exists):
+        """Tests that picking up tools_config.yaml from the cwd warns.
+
+        An ads_mcp logger with no real handler attached only surfaces
+        WARNING and above (see server._configure_stderr_logging), so this
+        line has to be a warning, not info, to ever actually be seen by
+        whoever is running the server -- silently picking up whatever
+        tools_config.yaml happens to be sitting in the working directory
+        is exactly the kind of thing they need to notice.
+        """
+        with self.assertLogs("ads_mcp.config", level="WARNING") as cm:
+            config = ToolsConfig.load()
+        self.assertTrue(config.is_namespace_enabled("search"))
+        self.assertTrue(
+            any("tools_config.yaml" in message for message in cm.output)
+        )
+
+    @patch.dict("os.environ", {}, clear=True)
     @patch("os.path.exists", return_value=False)
     @patch("ads_mcp.config.importlib.resources.files")
     def test_load_falls_back_to_bundled_default(self, mock_files, mock_exists):
@@ -246,3 +308,53 @@ class TestToolsConfig(unittest.TestCase):
         self.assertTrue(config.is_namespace_enabled("customers"))
         self.assertTrue(config.is_namespace_enabled("search"))
         self.assertTrue(config.is_namespace_enabled("metadata"))
+
+
+class TestOauthConfigured(unittest.TestCase):
+    """Test cases for oauth_configured()."""
+
+    def test_neither_set_returns_false_silently(self):
+        """Tests that leaving OAuth entirely unset is not itself a warning."""
+        with patch.dict("os.environ", {}, clear=True):
+            with self.assertNoLogs("ads_mcp.config", level="WARNING"):
+                self.assertFalse(oauth_configured())
+
+    def test_both_set_returns_true(self):
+        """Tests that setting both env vars enables OAuth."""
+        with patch.dict(
+            "os.environ",
+            {
+                OAUTH_CLIENT_ID_ENV_VAR: "a-client-id",
+                OAUTH_CLIENT_SECRET_ENV_VAR: "a-client-secret",
+            },
+            clear=True,
+        ):
+            with self.assertNoLogs("ads_mcp.config", level="WARNING"):
+                self.assertTrue(oauth_configured())
+
+    def test_only_client_id_set_warns_and_returns_false(self):
+        """Tests that a half-configured OAuth setup is flagged, not silently
+        treated the same as OAuth being off on purpose."""
+        with patch.dict(
+            "os.environ",
+            {OAUTH_CLIENT_ID_ENV_VAR: "a-client-id"},
+            clear=True,
+        ):
+            with self.assertLogs("ads_mcp.config", level="WARNING") as cm:
+                self.assertFalse(oauth_configured())
+        self.assertTrue(
+            any(OAUTH_CLIENT_SECRET_ENV_VAR in message for message in cm.output)
+        )
+
+    def test_only_client_secret_set_warns_and_returns_false(self):
+        """Tests the other half-configured direction (secret without ID)."""
+        with patch.dict(
+            "os.environ",
+            {OAUTH_CLIENT_SECRET_ENV_VAR: "a-client-secret"},
+            clear=True,
+        ):
+            with self.assertLogs("ads_mcp.config", level="WARNING") as cm:
+                self.assertFalse(oauth_configured())
+        self.assertTrue(
+            any(OAUTH_CLIENT_ID_ENV_VAR in message for message in cm.output)
+        )
