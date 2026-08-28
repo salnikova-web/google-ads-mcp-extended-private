@@ -24,6 +24,11 @@ export GIT_AUTHOR_EMAIL="noreply@example.com"
 export GIT_COMMITTER_NAME="google-ads-mcp-extended contributors"
 export GIT_COMMITTER_EMAIL="noreply@example.com"
 
+# The clean-room test run executes Python inside EXPORT_DIR; without
+# this, .pyc byte-code files would pollute the export and get synced
+# into the public clone (caught once by the final gate — keep it).
+export PYTHONDONTWRITEBYTECODE=1
+
 # --- Guards: only committed main of the private repo is publishable ---
 if [ -n "$(git -C "$PRIVATE_REPO" status --porcelain)" ]; then
   echo "release.sh: private working tree is dirty; commit first." >&2
@@ -91,9 +96,22 @@ EXPORT_DIR="$WORK_DIR/export"
 (cd "$EXPORT_DIR" && "$WORK_DIR/venv/bin/python" -m unittest \
   tests.smoke.smoke_test)
 
-# --- Sync, commit, tag ------------------------------------------------
+# Belt and suspenders: strip any byte-code the test run may still have
+# produced, then prove the export is byte-identical to a fresh one.
+find "$EXPORT_DIR" -name "__pycache__" -type d -prune -exec rm -rf {} +
+find "$EXPORT_DIR" \( -name "*.pyc" -o -name ".coverage*" \) -delete
+
+# --- Sync, gate, commit, tag ------------------------------------------
 rsync -a --delete --exclude=/.git "$EXPORT_DIR/" "$PUBLIC_CLONE/"
 git -C "$PUBLIC_CLONE" add -A
+
+# Independent scan of exactly what is about to be committed; failing
+# HERE leaves no commit behind (git reset restores the staged mess).
+if ! "$VENV_PY" "$PRIVATE_REPO/scripts/publish/gate.py" "$PUBLIC_CLONE"; then
+  git -C "$PUBLIC_CLONE" reset >/dev/null
+  echo "release.sh: gate failed on the synced clone; nothing committed." >&2
+  exit 1
+fi
 
 if git -C "$PUBLIC_CLONE" rev-parse -q --verify HEAD >/dev/null; then
   MESSAGE="Release v$VERSION"
@@ -107,9 +125,6 @@ fi
 
 git -C "$PUBLIC_CLONE" commit -m "$MESSAGE"
 git -C "$PUBLIC_CLONE" tag -a "v$VERSION" -m "$MESSAGE"
-
-# Final independent scan of exactly what is about to be pushed.
-"$VENV_PY" "$PRIVATE_REPO/scripts/publish/gate.py" "$PUBLIC_CLONE"
 
 echo
 echo "release.sh: committed and tagged v$VERSION in $PUBLIC_CLONE" \
