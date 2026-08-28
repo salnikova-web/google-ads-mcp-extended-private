@@ -473,12 +473,8 @@ def list_campaign_assets(
                     "status": row.campaign_asset.status.name,
                 }
             )
-        truncated = len(out) > cap
-        items = out[:cap]
-        return {
-            "items": items,
-            "returned": len(items),
-            "truncated": truncated,
-        }
+        # Same keys as before (items/returned/truncated); the shared
+        # envelope adds the never-silent "warning" when the cut fires.
+        return utils.list_envelope(out, cap)
     except GoogleAdsException as ex:
         _raise_tool_error(ex)

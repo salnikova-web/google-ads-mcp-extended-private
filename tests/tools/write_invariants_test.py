@@ -173,6 +173,17 @@ class TestValidateOnlySamples(unittest.TestCase):
             ("1234567890", "222"),
             {"target_cpa": 5.0},
         ),
+        # One of the two demand_gen tools whose action string was wrong
+        # (bare name, no namespace prefix) until it was fixed; sampled so
+        # the action-string check below actually covers it. Its sibling
+        # asset_upload_image takes the same path but has to fetch and
+        # read image bytes first, which is a mock this file does not
+        # otherwise need.
+        (
+            demand_gen.asset_create_youtube_video,
+            ("1234567890", "Promo video", "dQw4w9WgXcQ"),
+            {},
+        ),
         (pmax.asset_group_update, ("1234567890", "333"), {"new_name": "New"}),
         (
             audiences.create,
@@ -278,8 +289,17 @@ class TestValidateOnlySamples(unittest.TestCase):
         Reuses the SAMPLES plumbing above rather than adding new mocking:
         every dry-run result already carries an "action" key straight from
         _preview_or_done, so no source scan is needed to check it.
+
+        The no-API dry-runs are checked here too. Their endpoints have no
+        validate_only field, so they cannot join SAMPLES (their dry-run
+        sends nothing at all — that is what mutate_test.TestNoApiDryRuns
+        asserts), but their action strings are exactly as wrong-able, and
+        experiments is a whole namespace that would otherwise go
+        unchecked. Nothing is sent on a dry-run, so this needs no mocks
+        beyond the ones setUp already installs.
         """
-        for fn, args, kwargs in self.SAMPLES:
+        entries = list(self.SAMPLES) + list(mutate_test.TestNoApiDryRuns.CALLS)
+        for fn, args, kwargs in entries:
             with self.subTest(tool=fn.__name__):
                 self.service.reset_mock()
                 result = fn(*args, **kwargs)

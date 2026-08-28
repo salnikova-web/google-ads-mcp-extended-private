@@ -362,10 +362,20 @@ def list_audiences(
     except GoogleAdsException as ex:
         _raise_tool_error(ex)
 
+    cut_sections = []
     for section in ("audiences", "user_lists", "custom_segments"):
         if len(out[section]) > cap:
             out[section] = out[section][:cap]
             out["truncated"][section] = True
+            cut_sections.append(section)
+    # The per-section flags live inside a nested map that is easy to skim
+    # past, so one envelope-level warning names the sections that were cut
+    # — truncation is never silent, whichever section it hit.
+    if cut_sections:
+        out["warning"] = (
+            utils.truncation_warning(cap)
+            + f" Sections cut: {', '.join(cut_sections)}."
+        )
     return out
 
 

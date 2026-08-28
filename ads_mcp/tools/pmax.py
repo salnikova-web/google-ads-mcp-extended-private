@@ -1134,8 +1134,15 @@ def list_asset_groups(
         }
         for row in rows[:limit]
     ]
-    return {
+    truncated = len(rows) > limit
+    result: Dict[str, Any] = {
         "asset_groups": asset_groups,
         "returned": len(asset_groups),
-        "truncated": len(rows) > limit,
+        "truncated": truncated,
     }
+    # Keys stay as they are (asset_groups/returned/truncated); the cut is
+    # what gains a voice — an asset group missing from a truncated list is
+    # not proof it does not exist.
+    if truncated:
+        result["warning"] = utils.truncation_warning(limit)
+    return result

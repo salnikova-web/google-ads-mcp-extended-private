@@ -244,8 +244,14 @@ def list_tracking(
             "tracking_url_template": acc_rows[0].customer.tracking_url_template,
             "final_url_suffix": acc_rows[0].customer.final_url_suffix,
         }
-    return {
+    result: Dict[str, Any] = {
         "account": account,
         "campaigns": campaigns,
         "truncated": truncated,
     }
+    # Keys stay as they are (account/campaigns/truncated); the cut is what
+    # gains a voice — a truncated list must never be read as "this
+    # campaign has no tracking".
+    if truncated:
+        result["warning"] = utils.truncation_warning(limit)
+    return result

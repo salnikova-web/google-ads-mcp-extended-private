@@ -222,11 +222,17 @@ def experiments_list(
                             "campaigns": list(r.experiment_arm.campaigns),
                         }
                     )
-        return {
+        result: Dict[str, Any] = {
             "experiments": list(experiments.values()),
             "returned": len(experiments),
             "truncated": truncated,
         }
+        # Keys stay as they are (experiments/returned/truncated); the cut
+        # is what gains a voice — an experiment missing from a truncated
+        # list is not proof it does not exist.
+        if truncated:
+            result["warning"] = utils.truncation_warning(limit)
+        return result
     except GoogleAdsException as ex:
         _raise_tool_error(ex)
 
